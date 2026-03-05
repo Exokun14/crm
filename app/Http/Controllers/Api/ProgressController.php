@@ -48,16 +48,36 @@ class ProgressController extends Controller
     public function update(Request $request, $id)
     {
         $validated = $request->validate([
-            'progress' => 'sometimes|integer|min:0|max:100',
-            'completed' => 'nullable|date',
-            'status' => 'sometimes|in:Not Started,In Progress,Completed',
-            'time_spent' => 'nullable|integer',
+            'progress'         => 'sometimes|integer|min:0|max:100',
+            'completed'        => 'nullable|date',
+            'status'           => 'sometimes|in:Not Started,In Progress,Completed',
+            'time_spent'       => 'nullable|integer|min:0',
             'assessment_score' => 'nullable|integer',
         ]);
 
+        $existing = DB::table('user_course_progress')->where('id', $id)->first();
+
+        if (!$existing) {
+            return response()->json(['error' => 'Progress record not found'], 404);
+        }
+
+        $updateData = ['updated_at' => now()];
+
+        if (isset($validated['progress']))         $updateData['progress']         = $validated['progress'];
+        if (isset($validated['completed']))        $updateData['completed']        = $validated['completed'];
+        if (isset($validated['status']))           $updateData['status']           = $validated['status'];
+        if (isset($validated['assessment_score'])) $updateData['assessment_score'] = $validated['assessment_score'];
+
+        // Accumulate time_spent — never overwrite with a smaller value
+        if (isset($validated['time_spent'])) {
+            $delta       = max(0, (int) $validated['time_spent']);
+            $currentTime = max(0, (int) ($existing->time_spent ?? 0));
+            $updateData['time_spent'] = $currentTime + min($delta, 120);
+        }
+
         DB::table('user_course_progress')
             ->where('id', $id)
-            ->update(array_merge($validated, ['updated_at' => now()]));
+            ->update($updateData);
 
         return response()->json(['message' => 'Progress updated']);
     }

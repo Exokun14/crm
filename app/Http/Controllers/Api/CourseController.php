@@ -160,18 +160,33 @@ class CourseController extends Controller
     public function updateProgress(Request $request, $id)
     {
         $validated = $request->validate([
-            'progress' => 'required|integer|min:0|max:100',
+            'progress' => 'required|numeric|min:0|max:100',
             'enrolled' => 'sometimes|boolean',
-            'time_spent' => 'sometimes|integer|min:0',
+            'completed' => 'sometimes|boolean',
+            'time_spent' => 'sometimes|numeric|min:0',
         ]);
 
+        $existing = DB::table('courses')->where('id', $id)->first();
+
         $updateData = [
-            'progress' => $validated['progress'],
+            'progress' => (int) round((float) $validated['progress']),
+            'enrolled' => true, // ALWAYS set enrolled when progress is updated
             'updated_at' => now(),
         ];
         
-        if (isset($validated['enrolled'])) {
-            $updateData['enrolled'] = $validated['enrolled'];
+        // Auto-set completed when progress reaches 100
+        if ((float) $validated['progress'] >= 100) {
+            $updateData['completed'] = true;
+        } elseif (isset($validated['completed'])) {
+            $updateData['completed'] = $validated['completed'];
+        }
+
+        if (isset($validated['time_spent']) && $existing) {
+            $delta       = max(0, (int) $validated['time_spent']); // never subtract time
+            $currentTime = max(0, (int) ($existing->time_spent ?? 0));
+            // Cap the per-call delta at 120 minutes to guard against a
+            // browser tab left open all day sending a huge value.
+            $updateData['time_spent'] = $currentTime + min($delta, 120);
         }
 
         DB::table('courses')->where('id', $id)->update($updateData);
