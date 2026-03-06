@@ -184,9 +184,8 @@ class CourseController extends Controller
         if (isset($validated['time_spent']) && $existing) {
             $delta       = max(0, (int) $validated['time_spent']); // never subtract time
             $currentTime = max(0, (int) ($existing->time_spent ?? 0));
-            // Cap the per-call delta at 120 minutes to guard against a
-            // browser tab left open all day sending a huge value.
-            $updateData['time_spent'] = $currentTime + min($delta, 120);
+            // Cap per-call delta at 7200 seconds (2 hours) to guard against stale tabs
+            $updateData['time_spent'] = $currentTime + min($delta, 7200);
         }
 
         DB::table('courses')->where('id', $id)->update($updateData);
@@ -232,6 +231,38 @@ class CourseController extends Controller
         }
 
         return response()->json(['message' => 'Modules updated successfully']);
+    }
+
+    /**
+     * Mark a single chapter as done by its ID.
+     * Called each time a learner completes a chapter so progress persists on reload.
+     */
+    public function markChapterDone(Request $request, $chapterId)
+    {
+        $chapter = DB::table('chapters')->where('id', $chapterId)->first();
+
+        if (!$chapter) {
+            return response()->json(['error' => 'Chapter not found'], 404);
+        }
+
+        DB::table('chapters')
+            ->where('id', $chapterId)
+            ->update(['done' => true, 'updated_at' => now()]);
+
+        // Also mark the parent module done if ALL its chapters are now done
+        $remaining = DB::table('chapters')
+            ->where('module_id', $chapter->module_id)
+            ->where('done', false)
+            ->where('id', '!=', $chapterId)
+            ->count();
+
+        if ($remaining === 0) {
+            DB::table('modules')
+                ->where('id', $chapter->module_id)
+                ->update(['done' => true, 'updated_at' => now()]);
+        }
+
+        return response()->json(['message' => 'Chapter marked as done']);
     }
 
     private function getCourseCompanies($courseId)

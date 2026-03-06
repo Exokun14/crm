@@ -61,3 +61,6 @@ Route::prefix('settings')->group(function () {
 
 // ── File Upload ──────────────────────────────────────────────────────────────
 Route::post('/upload', [FileUploadController::class, 'upload']);
+
+// ── Mark a single chapter as done ───────────────────────────────────────
+Route::put('/chapters/{chapterId}/done', [CourseController::class, 'markChapterDone']);

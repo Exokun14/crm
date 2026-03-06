@@ -68,11 +68,12 @@ class ProgressController extends Controller
         if (isset($validated['status']))           $updateData['status']           = $validated['status'];
         if (isset($validated['assessment_score'])) $updateData['assessment_score'] = $validated['assessment_score'];
 
-        // Accumulate time_spent — never overwrite with a smaller value
+        // Accumulate time_spent (stored in seconds) — never overwrite with a smaller value
         if (isset($validated['time_spent'])) {
             $delta       = max(0, (int) $validated['time_spent']);
             $currentTime = max(0, (int) ($existing->time_spent ?? 0));
-            $updateData['time_spent'] = $currentTime + min($delta, 120);
+            // Cap per-call delta at 7200 seconds (2 hours) to guard against stale tabs
+            $updateData['time_spent'] = $currentTime + min($delta, 7200);
         }
 
         DB::table('user_course_progress')
