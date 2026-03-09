@@ -22,6 +22,8 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'role',
+        'role_assigned_at',
     ];
 
     /**
@@ -44,9 +46,48 @@ class User extends Authenticatable
     protected function casts(): array
     {
         return [
-            'email_verified_at' => 'datetime',
-            'password' => 'hashed',
+            'email_verified_at'       => 'datetime',
+            'password'                => 'hashed',
             'two_factor_confirmed_at' => 'datetime',
+            'role_assigned_at'        => 'datetime',
         ];
+    }
+
+    /* ── Role helpers ──────────────────────────────────────────────────────── */
+
+    public function isAdmin(): bool
+    {
+        return $this->role === 'admin';
+    }
+
+    public function isManager(): bool
+    {
+        return $this->role === 'manager';
+    }
+
+    public function isUser(): bool
+    {
+        return $this->role === 'user';
+    }
+
+    /**
+     * Generic role check — use this for any future roles without touching the model.
+     * Example: $user->hasRole('supervisor')
+     */
+    public function hasRole(string $role): bool
+    {
+        return $this->role === $role;
+    }
+
+    /**
+     * Assign a role and record when it was assigned.
+     * Example: $user->assignRole('manager')
+     */
+    public function assignRole(string $role): void
+    {
+        $this->update([
+            'role'             => $role,
+            'role_assigned_at' => now(),
+        ]);
     }
 }

@@ -8,21 +8,34 @@ use Illuminate\Support\Facades\DB;
 
 class CourseController extends Controller
 {
+    // Valid stage values
+    const VALID_STAGES = ['draft', 'review_ready', 'published', 'unpublished', 'template'];
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET /courses
+    // ─────────────────────────────────────────────────────────────────────────
     public function index(Request $request)
     {
         $query = DB::table('courses');
 
-        // Filter by category
         if ($request->has('category') && $request->category !== 'All') {
             $query->where('cat', $request->category);
         }
 
-        // Filter by active status
         if ($request->has('active')) {
             $query->where('active', $request->active);
         }
 
-        // Filter by client
+        // Filter by stage (e.g. ?stage=template or ?stage=published)
+        if ($request->has('stage')) {
+            $query->where('stage', $request->stage);
+        }
+
+        // Exclude templates from the default listing unless explicitly requested
+        if (!$request->has('stage')) {
+            $query->where('stage', '!=', 'template');
+        }
+
         if ($request->has('client_id')) {
             $query->join('course_client', 'courses.id', '=', 'course_client.course_id')
                   ->where('course_client.client_id', $request->client_id)
@@ -31,58 +44,56 @@ class CourseController extends Controller
 
         $courses = $query->get();
 
-        // Attach relationships
         foreach ($courses as $course) {
             $course->companies = $this->getCourseCompanies($course->id);
-            $course->modules = [];
+            $course->modules   = [];
         }
 
         return response()->json($courses);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // POST /courses
+    // ─────────────────────────────────────────────────────────────────────────
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'title' => 'required|string|max:255',
-            'desc' => 'nullable|string',
-            'time' => 'required|string',
-            'cat' => 'required|string',
-            'thumb' => 'nullable|string',
-            'thumb_emoji' => 'nullable|string',
-            'companies' => 'nullable|array',
+            'title'      => 'required|string|max:255',
+            'desc'       => 'nullable|string',
+            'time'       => 'required|string',
+            'cat'        => 'required|string',
+            'thumb'      => 'nullable|string',
+            'thumb_emoji'=> 'nullable|string',
+            'companies'  => 'nullable|array',
+            'stage'      => 'nullable|string|in:draft,review_ready,published,unpublished,template',
         ]);
+
+        $stage  = $validated['stage'] ?? 'draft';
+        $active = $stage === 'published';
 
         $courseId = DB::table('courses')->insertGetId([
-            'title' => $validated['title'],
-            'desc' => $validated['desc'] ?? '',
-            'time' => $validated['time'],
-            'cat' => $validated['cat'],
-            'thumb' => $validated['thumb'] ?? null,
+            'title'       => $validated['title'],
+            'desc'        => $validated['desc'] ?? '',
+            'time'        => $validated['time'],
+            'cat'         => $validated['cat'],
+            'thumb'       => $validated['thumb'] ?? null,
             'thumb_emoji' => $validated['thumb_emoji'] ?? '📚',
-            'active' => true,
-            'created_at' => now(),
-            'updated_at' => now(),
+            'active'      => $active,
+            'stage'       => $stage,
+            'created_at'  => now(),
+            'updated_at'  => now(),
         ]);
 
-        // Attach companies
         if (!empty($validated['companies'])) {
-            $companies = DB::table('clients')
-                ->whereIn('name', $validated['companies'])
-                ->pluck('id');
-            
-            foreach ($companies as $clientId) {
-                DB::table('course_client')->insert([
-                    'course_id' => $courseId,
-                    'client_id' => $clientId,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
+            $this->syncCompanies($courseId, $validated['companies']);
         }
 
         return response()->json(['id' => $courseId, 'message' => 'Course created successfully'], 201);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET /courses/{id}
+    // ─────────────────────────────────────────────────────────────────────────
     public function show($id)
     {
         $course = DB::table('courses')->where('id', $id)->first();
@@ -92,89 +103,183 @@ class CourseController extends Controller
         }
 
         $course->companies = $this->getCourseCompanies($id);
-        $course->modules = $this->getCourseModules($id);
+        $course->modules   = $this->getCourseModules($id);
 
         return response()->json($course);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // PUT /courses/{id}
+    // ─────────────────────────────────────────────────────────────────────────
     public function update(Request $request, $id)
     {
         $validated = $request->validate([
-            'title' => 'sometimes|string|max:255',
-            'desc' => 'nullable|string',
-            'time' => 'sometimes|string',
-            'cat' => 'sometimes|string',
-            'thumb' => 'nullable|string',
-            'thumb_emoji' => 'nullable|string',
-            'active' => 'sometimes|boolean',
-            'companies' => 'nullable|array',
+            'title'      => 'sometimes|string|max:255',
+            'desc'       => 'nullable|string',
+            'time'       => 'sometimes|string',
+            'cat'        => 'sometimes|string',
+            'thumb'      => 'nullable|string',
+            'thumb_emoji'=> 'nullable|string',
+            'active'     => 'sometimes|boolean',
+            'companies'  => 'nullable|array',
+            'stage'      => 'nullable|string|in:draft,review_ready,published,unpublished,template',
         ]);
 
         $existing = DB::table('courses')->where('id', $id)->first();
-        
+
         if (!$existing) {
             return response()->json(['error' => 'Course not found'], 404);
         }
 
         $updateData = ['updated_at' => now()];
-        
-        if (isset($validated['title'])) $updateData['title'] = $validated['title'];
-        if (isset($validated['desc'])) $updateData['desc'] = $validated['desc'];
-        if (isset($validated['time'])) $updateData['time'] = $validated['time'];
-        if (isset($validated['cat'])) $updateData['cat'] = $validated['cat'];
-        if (isset($validated['thumb'])) $updateData['thumb'] = $validated['thumb'];
+
+        if (isset($validated['title']))       $updateData['title']       = $validated['title'];
+        if (isset($validated['desc']))        $updateData['desc']        = $validated['desc'];
+        if (isset($validated['time']))        $updateData['time']        = $validated['time'];
+        if (isset($validated['cat']))         $updateData['cat']         = $validated['cat'];
+        if (isset($validated['thumb']))       $updateData['thumb']       = $validated['thumb'];
         if (isset($validated['thumb_emoji'])) $updateData['thumb_emoji'] = $validated['thumb_emoji'];
-        if (isset($validated['active'])) $updateData['active'] = $validated['active'];
+
+        // Stage drives active; allow explicit active override too
+        if (isset($validated['stage'])) {
+            $updateData['stage']  = $validated['stage'];
+            $updateData['active'] = $validated['stage'] === 'published';
+        } elseif (isset($validated['active'])) {
+            $updateData['active'] = $validated['active'];
+            // Keep stage in sync when only active is sent (legacy callers)
+            $updateData['stage']  = $validated['active'] ? 'published' : 'unpublished';
+        }
 
         DB::table('courses')->where('id', $id)->update($updateData);
 
-        if (isset($validated['companies'])) {
+        if (array_key_exists('companies', $validated)) {
             DB::table('course_client')->where('course_id', $id)->delete();
-            
-            $companies = DB::table('clients')
-                ->whereIn('name', $validated['companies'])
-                ->pluck('id');
-            
-            foreach ($companies as $clientId) {
-                DB::table('course_client')->insert([
-                    'course_id' => $id,
-                    'client_id' => $clientId,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
+            if (!empty($validated['companies'])) {
+                $this->syncCompanies($id, $validated['companies']);
             }
         }
 
         return response()->json(['message' => 'Course updated successfully']);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // DELETE /courses/{id}
+    // ─────────────────────────────────────────────────────────────────────────
     public function destroy($id)
     {
         DB::table('courses')->where('id', $id)->delete();
         return response()->json(['message' => 'Course deleted successfully']);
     }
 
-    /**
-     * Update course progress
-     */
+    // ─────────────────────────────────────────────────────────────────────────
+    // POST /courses/{id}/clone
+    // Clones a template (or any course) into a new draft course.
+    // Returns the new course id so the frontend can jump straight to it.
+    // ─────────────────────────────────────────────────────────────────────────
+    public function clone(Request $request, $id)
+    {
+        $source = DB::table('courses')->where('id', $id)->first();
+
+        if (!$source) {
+            return response()->json(['error' => 'Source course not found'], 404);
+        }
+
+        // Create the new course as a draft
+        $newId = DB::table('courses')->insertGetId([
+            'title'       => $source->title . ' (Copy)',
+            'desc'        => $source->desc,
+            'time'        => $source->time,
+            'cat'         => $source->cat,
+            'thumb'       => $source->thumb,
+            'thumb_emoji' => $source->thumb_emoji,
+            'active'      => false,
+            'stage'       => 'draft',
+            'progress'    => 0,
+            'enrolled'    => false,
+            'completed'   => false,
+            'time_spent'  => 0,
+            'created_at'  => now(),
+            'updated_at'  => now(),
+        ]);
+
+        // Clone company assignments
+        $companies = DB::table('course_client')->where('course_id', $id)->get();
+        foreach ($companies as $link) {
+            DB::table('course_client')->insert([
+                'course_id'  => $newId,
+                'client_id'  => $link->client_id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        // Clone modules and chapters
+        $modules = DB::table('modules')
+            ->where('course_id', $id)
+            ->orderBy('order')
+            ->get();
+
+        foreach ($modules as $module) {
+            $newModuleId = DB::table('modules')->insertGetId([
+                'course_id'  => $newId,
+                'title'      => $module->title,
+                'done'       => false,
+                'order'      => $module->order,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $chapters = DB::table('chapters')
+                ->where('module_id', $module->id)
+                ->orderBy('order')
+                ->get();
+
+            foreach ($chapters as $chapter) {
+                DB::table('chapters')->insert([
+                    'module_id'  => $newModuleId,
+                    'title'      => $chapter->title,
+                    'type'       => $chapter->type,
+                    'done'       => false,
+                    'order'      => $chapter->order,
+                    'content'    => $chapter->content,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+        }
+
+        // Return the full new course so the frontend can append it immediately
+        $newCourse            = DB::table('courses')->where('id', $newId)->first();
+        $newCourse->companies = $this->getCourseCompanies($newId);
+        $newCourse->modules   = [];
+
+        return response()->json([
+            'id'      => $newId,
+            'course'  => $newCourse,
+            'message' => 'Course cloned successfully',
+        ], 201);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PUT /courses/{id}/progress
+    // ─────────────────────────────────────────────────────────────────────────
     public function updateProgress(Request $request, $id)
     {
         $validated = $request->validate([
-            'progress' => 'required|numeric|min:0|max:100',
-            'enrolled' => 'sometimes|boolean',
-            'completed' => 'sometimes|boolean',
+            'progress'   => 'required|numeric|min:0|max:100',
+            'enrolled'   => 'sometimes|boolean',
+            'completed'  => 'sometimes|boolean',
             'time_spent' => 'sometimes|numeric|min:0',
         ]);
 
         $existing = DB::table('courses')->where('id', $id)->first();
 
         $updateData = [
-            'progress' => (int) round((float) $validated['progress']),
-            'enrolled' => true, // ALWAYS set enrolled when progress is updated
+            'progress'   => (int) round((float) $validated['progress']),
+            'enrolled'   => true,
             'updated_at' => now(),
         ];
-        
-        // Auto-set completed when progress reaches 100
+
         if ((float) $validated['progress'] >= 100) {
             $updateData['completed'] = true;
         } elseif (isset($validated['completed'])) {
@@ -182,9 +287,8 @@ class CourseController extends Controller
         }
 
         if (isset($validated['time_spent']) && $existing) {
-            $delta       = max(0, (int) $validated['time_spent']); // never subtract time
+            $delta       = max(0, (int) $validated['time_spent']);
             $currentTime = max(0, (int) ($existing->time_spent ?? 0));
-            // Cap per-call delta at 7200 seconds (2 hours) to guard against stale tabs
             $updateData['time_spent'] = $currentTime + min($delta, 7200);
         }
 
@@ -193,36 +297,36 @@ class CourseController extends Controller
         return response()->json(['message' => 'Progress updated successfully']);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // PUT /courses/{id}/modules
+    // ─────────────────────────────────────────────────────────────────────────
     public function updateModules(Request $request, $id)
     {
         $validated = $request->validate([
             'modules' => 'required|array',
         ]);
 
-        // Delete existing modules
         DB::table('modules')->where('course_id', $id)->delete();
 
-        // Insert new modules
         foreach ($validated['modules'] as $index => $moduleData) {
             $moduleId = DB::table('modules')->insertGetId([
-                'course_id' => $id,
-                'title' => $moduleData['title'],
-                'done' => $moduleData['done'] ?? false,
-                'order' => $index,
+                'course_id'  => $id,
+                'title'      => $moduleData['title'],
+                'done'       => $moduleData['done'] ?? false,
+                'order'      => $index,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
 
-            // Insert chapters
             if (!empty($moduleData['chapters'])) {
                 foreach ($moduleData['chapters'] as $chIndex => $chapterData) {
                     DB::table('chapters')->insert([
-                        'module_id' => $moduleId,
-                        'title' => $chapterData['title'],
-                        'type' => $chapterData['type'],
-                        'done' => $chapterData['done'] ?? false,
-                        'order' => $chIndex,
-                        'content' => json_encode($chapterData['content']),
+                        'module_id'  => $moduleId,
+                        'title'      => $chapterData['title'],
+                        'type'       => $chapterData['type'],
+                        'done'       => $chapterData['done'] ?? false,
+                        'order'      => $chIndex,
+                        'content'    => json_encode($chapterData['content']),
                         'created_at' => now(),
                         'updated_at' => now(),
                     ]);
@@ -233,10 +337,9 @@ class CourseController extends Controller
         return response()->json(['message' => 'Modules updated successfully']);
     }
 
-    /**
-     * Mark a single chapter as done by its ID.
-     * Called each time a learner completes a chapter so progress persists on reload.
-     */
+    // ─────────────────────────────────────────────────────────────────────────
+    // PUT /chapters/{chapterId}/done
+    // ─────────────────────────────────────────────────────────────────────────
     public function markChapterDone(Request $request, $chapterId)
     {
         $chapter = DB::table('chapters')->where('id', $chapterId)->first();
@@ -249,7 +352,6 @@ class CourseController extends Controller
             ->where('id', $chapterId)
             ->update(['done' => true, 'updated_at' => now()]);
 
-        // Also mark the parent module done if ALL its chapters are now done
         $remaining = DB::table('chapters')
             ->where('module_id', $chapter->module_id)
             ->where('done', false)
@@ -265,6 +367,9 @@ class CourseController extends Controller
         return response()->json(['message' => 'Chapter marked as done']);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Private helpers
+    // ─────────────────────────────────────────────────────────────────────────
     private function getCourseCompanies($courseId)
     {
         return DB::table('clients')
@@ -294,5 +399,21 @@ class CourseController extends Controller
         }
 
         return $modules->toArray();
+    }
+
+    private function syncCompanies($courseId, array $companyNames)
+    {
+        $clientIds = DB::table('clients')
+            ->whereIn('name', $companyNames)
+            ->pluck('id');
+
+        foreach ($clientIds as $clientId) {
+            DB::table('course_client')->insert([
+                'course_id'  => $courseId,
+                'client_id'  => $clientId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
     }
 }
