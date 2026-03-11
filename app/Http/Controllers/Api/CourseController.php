@@ -8,7 +8,6 @@ use Illuminate\Support\Facades\DB;
 
 class CourseController extends Controller
 {
-    // Valid stage values
     const VALID_STAGES = ['draft', 'review_ready', 'published', 'unpublished', 'template'];
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -21,28 +20,57 @@ class CourseController extends Controller
         if ($request->has('category') && $request->category !== 'All') {
             $query->where('cat', $request->category);
         }
-
         if ($request->has('active')) {
             $query->where('active', $request->active);
         }
-
-        // Filter by stage (e.g. ?stage=template or ?stage=published)
         if ($request->has('stage')) {
             $query->where('stage', $request->stage);
         }
-
-        // Exclude templates from the default listing unless explicitly requested
         if (!$request->has('stage')) {
             $query->where('stage', '!=', 'template');
         }
 
+        // Filter by company_id (was: client_id via course_client)
         if ($request->has('client_id')) {
-            $query->join('course_client', 'courses.id', '=', 'course_client.course_id')
-                  ->where('course_client.client_id', $request->client_id)
+            $query->join('company_course', 'courses.id', '=', 'company_course.course_id')
+                  ->where('company_course.company_id', $request->client_id)
                   ->select('courses.*');
         }
 
         $courses = $query->get();
+
+        foreach ($courses as $course) {
+            $course->companies = $this->getCourseCompanies($course->id);
+            $course->modules   = [];
+        }
+
+        return response()->json($courses);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET /user/courses  (called from CourseController if routed here,
+    //                     but primary handler is the closure in api.php)
+    // ─────────────────────────────────────────────────────────────────────────
+    public function getUserCourses(Request $request)
+    {
+        $user = $request->user();
+
+        if (!$user) {
+            return response()->json(['error' => 'Unauthenticated'], 401);
+        }
+
+        if ($user->role === 'admin' || !$user->company_id) {
+            $courses = DB::table('courses')
+                ->where('stage', 'published')
+                ->get();
+        } else {
+            $courses = DB::table('courses')
+                ->join('company_course', 'courses.id', '=', 'company_course.course_id')
+                ->where('company_course.company_id', $user->company_id)
+                ->where('courses.stage', 'published')
+                ->select('courses.*')
+                ->get();
+        }
 
         foreach ($courses as $course) {
             $course->companies = $this->getCourseCompanies($course->id);
@@ -58,14 +86,14 @@ class CourseController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'title'      => 'required|string|max:255',
-            'desc'       => 'nullable|string',
-            'time'       => 'required|string',
-            'cat'        => 'required|string',
-            'thumb'      => 'nullable|string',
-            'thumb_emoji'=> 'nullable|string',
-            'companies'  => 'nullable|array',
-            'stage'      => 'nullable|string|in:draft,review_ready,published,unpublished,template',
+            'title'       => 'required|string|max:255',
+            'desc'        => 'nullable|string',
+            'time'        => 'required|string',
+            'cat'         => 'required|string',
+            'thumb'       => 'nullable|string',
+            'thumb_emoji' => 'nullable|string',
+            'companies'   => 'nullable|array',
+            'stage'       => 'nullable|string|in:draft,review_ready,published,unpublished,template',
         ]);
 
         $stage  = $validated['stage'] ?? 'draft';
@@ -114,15 +142,15 @@ class CourseController extends Controller
     public function update(Request $request, $id)
     {
         $validated = $request->validate([
-            'title'      => 'sometimes|string|max:255',
-            'desc'       => 'nullable|string',
-            'time'       => 'sometimes|string',
-            'cat'        => 'sometimes|string',
-            'thumb'      => 'nullable|string',
-            'thumb_emoji'=> 'nullable|string',
-            'active'     => 'sometimes|boolean',
-            'companies'  => 'nullable|array',
-            'stage'      => 'nullable|string|in:draft,review_ready,published,unpublished,template',
+            'title'       => 'sometimes|string|max:255',
+            'desc'        => 'nullable|string',
+            'time'        => 'sometimes|string',
+            'cat'         => 'sometimes|string',
+            'thumb'       => 'nullable|string',
+            'thumb_emoji' => 'nullable|string',
+            'active'      => 'sometimes|boolean',
+            'companies'   => 'nullable|array',
+            'stage'       => 'nullable|string|in:draft,review_ready,published,unpublished,template',
         ]);
 
         $existing = DB::table('courses')->where('id', $id)->first();
@@ -140,20 +168,19 @@ class CourseController extends Controller
         if (isset($validated['thumb']))       $updateData['thumb']       = $validated['thumb'];
         if (isset($validated['thumb_emoji'])) $updateData['thumb_emoji'] = $validated['thumb_emoji'];
 
-        // Stage drives active; allow explicit active override too
         if (isset($validated['stage'])) {
             $updateData['stage']  = $validated['stage'];
             $updateData['active'] = $validated['stage'] === 'published';
         } elseif (isset($validated['active'])) {
             $updateData['active'] = $validated['active'];
-            // Keep stage in sync when only active is sent (legacy callers)
             $updateData['stage']  = $validated['active'] ? 'published' : 'unpublished';
         }
 
         DB::table('courses')->where('id', $id)->update($updateData);
 
+        // Sync companies if provided (now uses company_course + companies table)
         if (array_key_exists('companies', $validated)) {
-            DB::table('course_client')->where('course_id', $id)->delete();
+            DB::table('company_course')->where('course_id', $id)->delete();
             if (!empty($validated['companies'])) {
                 $this->syncCompanies($id, $validated['companies']);
             }
@@ -173,8 +200,6 @@ class CourseController extends Controller
 
     // ─────────────────────────────────────────────────────────────────────────
     // POST /courses/{id}/clone
-    // Clones a template (or any course) into a new draft course.
-    // Returns the new course id so the frontend can jump straight to it.
     // ─────────────────────────────────────────────────────────────────────────
     public function clone(Request $request, $id)
     {
@@ -184,7 +209,6 @@ class CourseController extends Controller
             return response()->json(['error' => 'Source course not found'], 404);
         }
 
-        // Create the new course as a draft
         $newId = DB::table('courses')->insertGetId([
             'title'       => $source->title . ' (Copy)',
             'desc'        => $source->desc,
@@ -202,14 +226,13 @@ class CourseController extends Controller
             'updated_at'  => now(),
         ]);
 
-        // Clone company assignments
-        $companies = DB::table('course_client')->where('course_id', $id)->get();
-        foreach ($companies as $link) {
-            DB::table('course_client')->insert([
-                'course_id'  => $newId,
-                'client_id'  => $link->client_id,
-                'created_at' => now(),
-                'updated_at' => now(),
+        // Clone company assignments (was: course_client/client_id)
+        $assignments = DB::table('company_course')->where('course_id', $id)->get();
+        foreach ($assignments as $row) {
+            DB::table('company_course')->insert([
+                'course_id'   => $newId,
+                'company_id'  => $row->company_id,
+                'assigned_at' => now(),
             ]);
         }
 
@@ -248,7 +271,6 @@ class CourseController extends Controller
             }
         }
 
-        // Return the full new course so the frontend can append it immediately
         $newCourse            = DB::table('courses')->where('id', $newId)->first();
         $newCourse->companies = $this->getCourseCompanies($newId);
         $newCourse->modules   = [];
@@ -287,8 +309,8 @@ class CourseController extends Controller
         }
 
         if (isset($validated['time_spent']) && $existing) {
-            $delta       = max(0, (int) $validated['time_spent']);
-            $currentTime = max(0, (int) ($existing->time_spent ?? 0));
+            $delta                    = max(0, (int) $validated['time_spent']);
+            $currentTime              = max(0, (int) ($existing->time_spent ?? 0));
             $updateData['time_spent'] = $currentTime + min($delta, 7200);
         }
 
@@ -370,16 +392,21 @@ class CourseController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
-    private function getCourseCompanies($courseId)
+
+    /**
+     * Returns company names for a course.
+     * Uses company_course pivot → companies table (matches migration).
+     */
+    private function getCourseCompanies($courseId): array
     {
-        return DB::table('clients')
-            ->join('course_client', 'clients.id', '=', 'course_client.client_id')
-            ->where('course_client.course_id', $courseId)
-            ->pluck('clients.name')
+        return DB::table('companies')
+            ->join('company_course', 'companies.id', '=', 'company_course.company_id')
+            ->where('company_course.course_id', $courseId)
+            ->pluck('companies.name')
             ->toArray();
     }
 
-    private function getCourseModules($courseId)
+    private function getCourseModules($courseId): array
     {
         $modules = DB::table('modules')
             ->where('course_id', $courseId)
@@ -401,18 +428,21 @@ class CourseController extends Controller
         return $modules->toArray();
     }
 
-    private function syncCompanies($courseId, array $companyNames)
+    /**
+     * Syncs company assignments by name → looks up company IDs from companies table.
+     * Previously used clients table — now correctly uses companies.
+     */
+    private function syncCompanies($courseId, array $companyNames): void
     {
-        $clientIds = DB::table('clients')
+        $companyIds = DB::table('companies')
             ->whereIn('name', $companyNames)
             ->pluck('id');
 
-        foreach ($clientIds as $clientId) {
-            DB::table('course_client')->insert([
-                'course_id'  => $courseId,
-                'client_id'  => $clientId,
-                'created_at' => now(),
-                'updated_at' => now(),
+        foreach ($companyIds as $companyId) {
+            DB::table('company_course')->insertOrIgnore([
+                'course_id'   => $courseId,
+                'company_id'  => $companyId,
+                'assigned_at' => now(),
             ]);
         }
     }
