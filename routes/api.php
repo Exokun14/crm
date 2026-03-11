@@ -11,7 +11,7 @@ use App\Http\Controllers\Api\ActivityController;
 use App\Http\Controllers\Api\ProgressController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\ClientController;
-use App\Http\Controllers\UploadController;
+use App\Http\Controllers\Api\UploadController;
 
 /*
 |--------------------------------------------------------------------------
@@ -20,15 +20,19 @@ use App\Http\Controllers\UploadController;
 */
 
 // ── Auth user info ────────────────────────────────────────────────────────────
+// Eager-loads company so company_name resolves in a single JOIN,
+// not a separate lazy query.
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
-    $user = $request->user();
+    $user = $request->user()->load('company');
+
     return response()->json([
-        'id'         => $user->id,
-        'name'       => $user->name,
-        'email'      => $user->email,
-        'role'       => $user->role,
-        'industry'   => $user->industry,
-        'company_id' => $user->company_id,
+        'id'           => $user->id,
+        'name'         => $user->name,
+        'email'        => $user->email,
+        'role'         => $user->role,
+        'industry'     => $user->industry,
+        'company_id'   => $user->company_id,
+        'company_name' => $user->company?->name,   // ← NEW: from companies.name
     ]);
 });
 

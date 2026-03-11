@@ -22,12 +22,16 @@ class Course extends Model
         'enrolled',
         'completed',
         'time_spent',
+        'modules',    // ← was missing — modules never persisted
+        'companies',  // ← was missing — company assignments via JSON field
     ];
 
     protected $casts = [
         'active'    => 'boolean',
         'enrolled'  => 'boolean',
         'completed' => 'boolean',
+        'modules'   => 'array',   // ← was missing — stored/retrieved as JSON
+        'companies' => 'array',   // ← was missing — stored/retrieved as JSON
     ];
 
     /**
