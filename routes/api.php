@@ -116,7 +116,12 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // ── Companies ─────────────────────────────────────────────────────────────
     Route::get('/companies', function () {
-        return response()->json(DB::table('companies')->get());
+        $companies = DB::table('companies')->get();
+        Log::info('[CompanyFetch] GET /api/companies → returning ' . $companies->count() . ' rows', [
+            'ids'         => $companies->pluck('id'),
+            'store_names' => $companies->pluck('store_name'),
+        ]);
+        return response()->json($companies);
     });
 
     Route::get('/companies/{id}', function ($id) {
@@ -425,12 +430,33 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/users', function (Request $request) {
         $query = DB::table('users')->select(
-            'id','name','email','role','industry','company_id',
-            'phone','position','status','created_at'
+            'id','full_name','name','email','role','company_id','created_at','status','phone','position'
         );
         if ($request->company_id) $query->where('company_id', $request->company_id);
-        if ($request->status)     $query->where('status', $request->status);
-        return response()->json($query->get());
+        $users = $query->get();
+        return response()->json(['success' => true, 'data' => $users]);
+    });
+
+    Route::post('/users', function (Request $request) {
+        $request->validate([
+            'email'    => 'required|email|unique:users,email',
+            'password' => 'required|min:6',
+        ]);
+        $id = DB::table('users')->insertGetId([
+            'full_name'    => $request->full_name ?? $request->name ?? '',
+            'name'         => $request->full_name ?? $request->name ?? '',
+            'email'        => $request->email,
+            'password'      => bcrypt($request->password),
+            'password_hash' => bcrypt($request->password),
+            'role'         => $request->access_level ?? $request->role ?? 'user',
+            'phone'        => $request->phone_number ?? $request->phone,
+            'position'     => $request->position_title ?? $request->position,
+            'status'       => $request->status ?? 'active',
+            'company_id'   => $request->company_id,
+            'created_at'   => now(),
+            'updated_at'   => now(),
+        ]);
+        return response()->json(['id' => $id, 'message' => 'User created.'], 201);
     });
 
     Route::put('/users/{id}', function (Request $request, $id) {
