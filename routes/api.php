@@ -434,7 +434,7 @@ Route::middleware('auth:sanctum')->group(function () {
         );
         if ($request->company_id) $query->where('company_id', $request->company_id);
         $users = $query->get();
-        return response()->json(['success' => true, 'data' => $users]);
+        return response()->json($users);
     });
 
     Route::post('/users', function (Request $request) {
