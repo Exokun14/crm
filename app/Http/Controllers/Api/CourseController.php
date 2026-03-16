@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -260,10 +261,6 @@ class CourseController extends Controller
             'thumb_emoji' => $source->thumb_emoji,
             'active'      => false,
             'stage'       => 'draft',
-            'progress'    => 0,
-            'enrolled'    => false,
-            'completed'   => false,
-            'time_spent'  => 0,
             'created_at'  => now(),
             'updated_at'  => now(),
         ]);
@@ -320,39 +317,85 @@ class CourseController extends Controller
 
     // ─────────────────────────────────────────────────────────────────────────
     // PUT /courses/{id}/progress
+    //
+    // FIX: Previously wrote progress/completed/time_spent directly onto the
+    // shared `courses` row, meaning one user completing a course marked it
+    // complete for everyone. Now we upsert into user_course_progress so each
+    // user's progress is stored and read independently.
+    // The shared `courses` table is no longer touched here.
     // ─────────────────────────────────────────────────────────────────────────
     public function updateProgress(Request $request, $id)
     {
-        Log::channel('stderr')->info('[CourseController@updateProgress] ▶ id=' . $id . ' payload: ' . json_encode($request->all()));
+        $userId = Auth::id();
+        Log::channel('stderr')->info('[CourseController@updateProgress] ▶ course_id=' . $id . ' user_id=' . $userId . ' payload: ' . json_encode($request->all()));
 
         $validated = $request->validate([
             'progress'   => 'required|numeric|min:0|max:100',
-            'enrolled'   => 'sometimes|boolean',
-            'completed'  => 'sometimes|boolean',
+            'enrolled'   => 'sometimes|nullable',   // accept 0/1/true/false
+            'completed'  => 'sometimes|nullable',   // accept 0/1/true/false
             'time_spent' => 'sometimes|numeric|min:0',
         ]);
 
-        $existing   = DB::table('courses')->where('id', $id)->first();
-        $updateData = [
-            'progress'   => (int) round((float) $validated['progress']),
-            'enrolled'   => true,
-            'updated_at' => now(),
-        ];
+        $progress    = (int) round((float) $validated['progress']);
+        $isCompleted = $progress >= 100 || in_array($validated['completed'] ?? null, [true, 1, '1', 'true'], true);
 
-        if ((float) $validated['progress'] >= 100) {
-            $updateData['completed'] = true;
-        } elseif (isset($validated['completed'])) {
-            $updateData['completed'] = $validated['completed'];
+        // Look up the course title for the user_course_progress record
+        $course = DB::table('courses')->where('id', $id)->first();
+        if (!$course) {
+            return response()->json(['error' => 'Course not found'], 404);
         }
 
-        if (isset($validated['time_spent']) && $existing) {
-            $delta                    = max(0, (int) $validated['time_spent']);
-            $currentTime              = max(0, (int) ($existing->time_spent ?? 0));
-            $updateData['time_spent'] = $currentTime + min($delta, 7200);
-        }
+        // Find any existing row for this user + course
+        $existing = DB::table('user_course_progress')
+            ->where('user_id',   $userId)
+            ->where('course',    $course->title)
+            ->first();
 
-        DB::table('courses')->where('id', $id)->update($updateData);
-        Log::channel('stderr')->info('[CourseController@updateProgress] ✅ Progress updated: id=' . $id . ' progress=' . $updateData['progress']);
+        if ($existing) {
+            $updateData = [
+                'progress'   => $progress,
+                'status'     => $isCompleted ? 'Completed' : ($progress > 0 ? 'In Progress' : 'Not Started'),
+                'updated_at' => now(),
+            ];
+
+            if ($isCompleted && !$existing->completed) {
+                $updateData['completed'] = now()->toDateString();
+            }
+
+            // Accumulate time_spent (in minutes) — cap per-call delta at 480 min (8 hours)
+            if (isset($validated['time_spent'])) {
+                $delta                    = max(0, (int) $validated['time_spent']);
+                $currentTime              = max(0, (int) ($existing->time_spent ?? 0));
+                $updateData['time_spent'] = $currentTime + min($delta, 480);
+            }
+
+            DB::table('user_course_progress')
+                ->where('id', $existing->id)
+                ->update($updateData);
+
+            Log::channel('stderr')->info('[CourseController@updateProgress] ✅ Updated user_course_progress id=' . $existing->id . ' progress=' . $progress);
+        } else {
+            // First time this user touches this course — create the row
+            $timeSpent = isset($validated['time_spent'])
+                ? min(max(0, (int) $validated['time_spent']), 480)
+                : 0;
+
+            DB::table('user_course_progress')->insert([
+                'user_id'    => $userId,
+                'name'       => Auth::user()->name ?? '',
+                'company'    => Auth::user()->company?->name ?? '',
+                'course'     => $course->title,
+                'progress'   => $progress,
+                'status'     => $isCompleted ? 'Completed' : ($progress > 0 ? 'In Progress' : 'Not Started'),
+                'started'    => now()->toDateString(),
+                'completed'  => $isCompleted ? now()->toDateString() : null,
+                'time_spent' => $timeSpent,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            Log::channel('stderr')->info('[CourseController@updateProgress] ✅ Created user_course_progress for user=' . $userId . ' course=' . $course->title);
+        }
 
         return response()->json(['message' => 'Progress updated successfully']);
     }
@@ -424,10 +467,22 @@ class CourseController extends Controller
 
     // ─────────────────────────────────────────────────────────────────────────
     // PUT /chapters/{chapterId}/done
+    //
+    // FIX: Previously this wrote `done = true` directly onto the shared
+    // `chapters` and `modules` rows, meaning one user completing a chapter
+    // marked it done for every other user.
+    //
+    // Now we write into the per-user progress tables:
+    //   user_chapter_progress  (user_id, chapter_id, done)
+    //   user_module_progress   (user_id, module_id,  done)
+    //
+    // The shared `chapters.done` and `modules.done` columns are no longer
+    // touched here — they remain as authoring/admin flags only.
     // ─────────────────────────────────────────────────────────────────────────
     public function markChapterDone(Request $request, $chapterId)
     {
-        Log::channel('stderr')->info('[CourseController@markChapterDone] ▶ chapterId=' . $chapterId);
+        $userId = Auth::id();
+        Log::channel('stderr')->info('[CourseController@markChapterDone] ▶ chapterId=' . $chapterId . ' user_id=' . $userId);
 
         $chapter = DB::table('chapters')->where('id', $chapterId)->first();
 
@@ -436,22 +491,74 @@ class CourseController extends Controller
             return response()->json(['error' => 'Chapter not found'], 404);
         }
 
-        DB::table('chapters')->where('id', $chapterId)->update(['done' => true, 'updated_at' => now()]);
+        // Upsert into user_chapter_progress (one row per user+chapter)
+        $existingChapterProgress = DB::table('user_chapter_progress')
+            ->where('user_id',    $userId)
+            ->where('chapter_id', $chapterId)
+            ->first();
 
-        $remaining = DB::table('chapters')
-            ->where('module_id', $chapter->module_id)
-            ->where('done', false)
-            ->where('id', '!=', $chapterId)
-            ->count();
-
-        Log::channel('stderr')->info('[CourseController@markChapterDone] Remaining undone chapters in module: ' . $remaining);
-
-        if ($remaining === 0) {
-            DB::table('modules')->where('id', $chapter->module_id)->update(['done' => true, 'updated_at' => now()]);
-            Log::channel('stderr')->info('[CourseController@markChapterDone] ✅ Module ' . $chapter->module_id . ' marked done');
+        if ($existingChapterProgress) {
+            DB::table('user_chapter_progress')
+                ->where('user_id',    $userId)
+                ->where('chapter_id', $chapterId)
+                ->update(['done' => true, 'updated_at' => now()]);
+        } else {
+            DB::table('user_chapter_progress')->insert([
+                'user_id'    => $userId,
+                'chapter_id' => $chapterId,
+                'done'       => true,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
         }
 
-        return response()->json(['message' => 'Chapter marked as done']);
+        Log::channel('stderr')->info('[CourseController@markChapterDone] ✅ user_chapter_progress upserted for user=' . $userId . ' chapter=' . $chapterId);
+
+        // Check if all chapters in this module are done FOR THIS USER
+        $totalInModule = DB::table('chapters')
+            ->where('module_id', $chapter->module_id)
+            ->count();
+
+        $doneInModule = DB::table('user_chapter_progress')
+            ->join('chapters', 'user_chapter_progress.chapter_id', '=', 'chapters.id')
+            ->where('user_chapter_progress.user_id', $userId)
+            ->where('chapters.module_id',            $chapter->module_id)
+            ->where('user_chapter_progress.done',    true)
+            ->count();
+
+        Log::channel('stderr')->info('[CourseController@markChapterDone] Module ' . $chapter->module_id . ': user done ' . $doneInModule . '/' . $totalInModule);
+
+        // Upsert into user_module_progress
+        $moduleDone = ($doneInModule >= $totalInModule && $totalInModule > 0);
+
+        $existingModuleProgress = DB::table('user_module_progress')
+            ->where('user_id',   $userId)
+            ->where('module_id', $chapter->module_id)
+            ->first();
+
+        if ($existingModuleProgress) {
+            DB::table('user_module_progress')
+                ->where('user_id',   $userId)
+                ->where('module_id', $chapter->module_id)
+                ->update(['done' => $moduleDone, 'updated_at' => now()]);
+        } else {
+            DB::table('user_module_progress')->insert([
+                'user_id'    => $userId,
+                'module_id'  => $chapter->module_id,
+                'done'       => $moduleDone,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        if ($moduleDone) {
+            Log::channel('stderr')->info('[CourseController@markChapterDone] ✅ Module ' . $chapter->module_id . ' marked done for user=' . $userId);
+        }
+
+        return response()->json([
+            'message'     => 'Chapter marked as done',
+            'module_done' => $moduleDone,
+        ]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

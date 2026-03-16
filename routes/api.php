@@ -98,6 +98,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::delete('activities/{id}',  [ActivityController::class, 'destroy']);
 
     // ── Progress ──────────────────────────────────────────────────────────────
+    // FIX: These two named-segment routes MUST be declared before progress/{id}
+    // otherwise Laravel's router would interpret "chapters" and "modules" as
+    // the {id} wildcard and never reach the correct controller methods.
+    Route::get  ('progress/chapters', [ProgressController::class, 'chapterProgress']);
+    Route::get  ('progress/modules',  [ProgressController::class, 'moduleProgress']);
+
     Route::get  ('progress',      [ProgressController::class, 'index']);
     Route::post ('progress',      [ProgressController::class, 'store']);
     Route::put  ('progress/{id}', [ProgressController::class, 'update']);
@@ -163,6 +169,93 @@ Route::middleware('auth:sanctum')->group(function () {
         }
         return response()->json(['message' => 'Company courses updated.']);
     });
+
+    // ── Company branding ──────────────────────────────────────────────────────
+    // GET    /api/companies/{id}/branding     → fetch cover photo URL + brand colour
+    // POST   /api/companies/{id}/cover-photo  → upload new cover photo
+    // DELETE /api/companies/{id}/cover-photo  → remove cover photo
+    // PUT    /api/companies/{id}/brand-color  → save chosen hex colour (null = reset)
+
+    Route::get('/companies/{id}/branding', function ($id) {
+        $company = DB::table('companies')->where('id', $id)->first();
+        if (!$company) return response()->json(['error' => 'Not found'], 404);
+
+        $coverUrl = null;
+        if (!empty($company->cover_photo_path)) {
+            $coverUrl = url('storage/' . $company->cover_photo_path);
+        }
+
+        return response()->json([
+            'cover_photo_url' => $coverUrl,
+            'brand_color'     => $company->brand_color ?? null,
+        ]);
+    });
+
+    Route::post('/companies/{id}/cover-photo', function (Request $request, $id) {
+        $request->validate([
+            'cover_photo' => ['required', 'image', 'mimes:jpeg,jpg,png,webp,gif', 'max:5120'],
+        ]);
+
+        $company = DB::table('companies')->where('id', $id)->first();
+        if (!$company) return response()->json(['error' => 'Not found'], 404);
+
+        if (!empty($company->cover_photo_path)) {
+            \Illuminate\Support\Facades\Storage::disk('public')->delete($company->cover_photo_path);
+        }
+
+        $path = $request->file('cover_photo')->store("covers/{$id}", 'public');
+
+        DB::table('companies')->where('id', $id)->update([
+            'cover_photo_path' => $path,
+            'updated_at'       => now(),
+        ]);
+
+        return response()->json([
+            'message'          => 'Cover photo updated.',
+            'cover_photo_url'  => url('storage/' . $path),
+            'cover_photo_path' => $path,
+        ]);
+    });
+
+    Route::delete('/companies/{id}/cover-photo', function ($id) {
+        $company = DB::table('companies')->where('id', $id)->first();
+        if (!$company) return response()->json(['error' => 'Not found'], 404);
+
+        if (!empty($company->cover_photo_path)) {
+            \Illuminate\Support\Facades\Storage::disk('public')->delete($company->cover_photo_path);
+            DB::table('companies')->where('id', $id)->update([
+                'cover_photo_path' => null,
+                'updated_at'       => now(),
+            ]);
+        }
+
+        return response()->json(['message' => 'Cover photo removed.']);
+    });
+
+    Route::put('/companies/{id}/brand-color', function (Request $request, $id) {
+        $request->validate([
+            'brand_color' => [
+                'nullable', 'string',
+                'regex:/^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/',
+            ],
+        ]);
+
+        $company = DB::table('companies')->where('id', $id)->first();
+        if (!$company) return response()->json(['error' => 'Not found'], 404);
+
+        $color = $request->input('brand_color') ?: null;
+
+        DB::table('companies')->where('id', $id)->update([
+            'brand_color' => $color,
+            'updated_at'  => now(),
+        ]);
+
+        return response()->json([
+            'message'     => $color ? 'Brand colour updated.' : 'Brand colour reset to logo default.',
+            'brand_color' => $color,
+        ]);
+    });
+
 
     // ── Branches ──────────────────────────────────────────────────────────────
     // GET  /api/branches?company_id=1  → list branches for a company

@@ -16,8 +16,8 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('companies', function (Blueprint $table) {
-            $table->string('cover_photo_path')->nullable()->after('logo_path');
-            $table->string('brand_color', 9)->nullable()->after('cover_photo_path');
+            $table->string('cover_photo_path')->nullable();
+            $table->string('brand_color', 9)->nullable();
             // 9 chars supports  #RRGGBB  and  #RRGGBBAA  formats
         });
     }
