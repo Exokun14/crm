@@ -12,6 +12,7 @@ use App\Http\Controllers\Api\ProgressController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\UploadController;
+use App\Http\Controllers\Api\CourseIconController;
 
 /*
 |--------------------------------------------------------------------------
@@ -109,11 +110,20 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put  ('progress/{id}', [ProgressController::class, 'update']);
 
     // ── Settings ──────────────────────────────────────────────────────────────
-    Route::get   ('settings',                   [SettingsController::class, 'index']);
-    Route::get   ('settings/categories',        [SettingsController::class, 'categories']);
-    Route::post  ('settings/categories',        [SettingsController::class, 'storeCategory']);
-    Route::delete('settings/categories/{name}', [SettingsController::class, 'deleteCategory']);
-    Route::get   ('settings/colors',            [SettingsController::class, 'colors']);
+    Route::get   ('settings',                          [SettingsController::class, 'index']);
+    Route::get   ('settings/categories',               [SettingsController::class, 'categories']);
+    Route::post  ('settings/categories',               [SettingsController::class, 'storeCategory']);
+    Route::delete('settings/categories/{name}',        [SettingsController::class, 'deleteCategory']);
+    Route::put   ('settings/categories/{name}',        [SettingsController::class, 'renameCategory']);  // NEW
+    Route::get   ('settings/colors',                   [SettingsController::class, 'colors']);
+
+    // ── Course Icons (user-specific uploads) ──────────────────────────────────
+    // POST   /api/course-icons          → upload icon (multipart, field: "icon")
+    // GET    /api/course-icons          → list current user's icons
+    // DELETE /api/course-icons/{id}     → delete one icon (owner only)
+    Route::post  ('course-icons',      [CourseIconController::class, 'store']);
+    Route::get   ('course-icons',      [CourseIconController::class, 'index']);
+    Route::delete('course-icons/{id}', [CourseIconController::class, 'destroy']);
 
     // ── Clients ───────────────────────────────────────────────────────────────
     Route::get('clients',              [ClientController::class, 'index']);
@@ -171,11 +181,6 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── Company branding ──────────────────────────────────────────────────────
-    // GET    /api/companies/{id}/branding     → fetch cover photo URL + brand colour
-    // POST   /api/companies/{id}/cover-photo  → upload new cover photo
-    // DELETE /api/companies/{id}/cover-photo  → remove cover photo
-    // PUT    /api/companies/{id}/brand-color  → save chosen hex colour (null = reset)
-
     Route::get('/companies/{id}/branding', function ($id) {
         $company = DB::table('companies')->where('id', $id)->first();
         if (!$company) return response()->json(['error' => 'Not found'], 404);
@@ -256,14 +261,7 @@ Route::middleware('auth:sanctum')->group(function () {
         ]);
     });
 
-
     // ── Branches ──────────────────────────────────────────────────────────────
-    // GET  /api/branches?company_id=1  → list branches for a company
-    // GET  /api/branches/1             → single branch
-    // POST /api/branches               → create
-    // PUT  /api/branches/1             → update
-    // DELETE /api/branches/1           → delete
-
     Route::get('/branches', function (Request $request) {
         $query = DB::table('branches');
         if ($request->company_id) $query->where('company_id', $request->company_id);
@@ -310,12 +308,6 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── POS Devices ───────────────────────────────────────────────────────────
-    // GET  /api/pos-devices?company_id=1
-    // GET  /api/pos-devices/1
-    // POST /api/pos-devices
-    // PUT  /api/pos-devices/1
-    // DELETE /api/pos-devices/1
-
     Route::get('/pos-devices', function (Request $request) {
         $query = DB::table('pos_devices');
         if ($request->company_id) $query->where('company_id', $request->company_id);
@@ -370,11 +362,6 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── Licenses ──────────────────────────────────────────────────────────────
-    // GET  /api/licenses?company_id=1
-    // POST /api/licenses
-    // PUT  /api/licenses/1
-    // DELETE /api/licenses/1
-
     Route::get('/licenses', function (Request $request) {
         $query = DB::table('licenses');
         if ($request->company_id) $query->where('company_id', $request->company_id);
@@ -412,11 +399,6 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── Tickets ───────────────────────────────────────────────────────────────
-    // GET  /api/tickets?company_id=1&status=open
-    // POST /api/tickets
-    // PUT  /api/tickets/1
-    // DELETE /api/tickets/1
-
     Route::get('/tickets', function (Request $request) {
         $query = DB::table('tickets');
         if ($request->company_id) $query->where('company_id', $request->company_id);
@@ -470,11 +452,6 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── Notifications ─────────────────────────────────────────────────────────
-    // GET  /api/notifications            → current user's notifications
-    // PUT  /api/notifications/{id}/read  → mark one as read
-    // PUT  /api/notifications/read-all   → mark all as read
-    // POST /api/notifications            → create (admin use)
-
     Route::get('/notifications', function (Request $request) {
         $user  = $request->user();
         $query = DB::table('notifications')
@@ -517,10 +494,6 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ── Users (portal user management) ───────────────────────────────────────
-    // GET  /api/users?company_id=1       → list users in a company
-    // PUT  /api/users/{id}               → update profile / position / status
-    // DELETE /api/users/{id}             → deactivate
-
     Route::get('/users', function (Request $request) {
         $query = DB::table('users')->select(
             'id','full_name','name','email','role','company_id','created_at','status','phone','position'
@@ -536,18 +509,18 @@ Route::middleware('auth:sanctum')->group(function () {
             'password' => 'required|min:6',
         ]);
         $id = DB::table('users')->insertGetId([
-            'full_name'    => $request->full_name ?? $request->name ?? '',
-            'name'         => $request->full_name ?? $request->name ?? '',
-            'email'        => $request->email,
+            'full_name'     => $request->full_name ?? $request->name ?? '',
+            'name'          => $request->full_name ?? $request->name ?? '',
+            'email'         => $request->email,
             'password'      => bcrypt($request->password),
             'password_hash' => bcrypt($request->password),
-            'role'         => $request->access_level ?? $request->role ?? 'user',
-            'phone'        => $request->phone_number ?? $request->phone,
-            'position'     => $request->position_title ?? $request->position,
-            'status'       => $request->status ?? 'active',
-            'company_id'   => $request->company_id,
-            'created_at'   => now(),
-            'updated_at'   => now(),
+            'role'          => $request->access_level ?? $request->role ?? 'user',
+            'phone'         => $request->phone_number ?? $request->phone,
+            'position'      => $request->position_title ?? $request->position,
+            'status'        => $request->status ?? 'active',
+            'company_id'    => $request->company_id,
+            'created_at'    => now(),
+            'updated_at'    => now(),
         ]);
         return response()->json(['id' => $id, 'message' => 'User created.'], 201);
     });
