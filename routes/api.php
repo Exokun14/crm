@@ -13,6 +13,7 @@ use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\UploadController;
 use App\Http\Controllers\Api\CourseIconController;
+use App\Http\Controllers\Api\ChatController;
 
 /*
 |--------------------------------------------------------------------------
@@ -544,6 +545,11 @@ Route::middleware('auth:sanctum')->group(function () {
         DB::table('users')->where('id', $id)->update(['status' => 'inactive', 'updated_at' => now()]);
         return response()->json(['message' => 'User deactivated.']);
     });
+
+    // ── Chat (Ollama-powered assistant) ───────────────────────────────────────
+    Route::post  ('chat',         [ChatController::class, 'send']);
+    Route::get   ('chat/history', [ChatController::class, 'history']);
+    Route::delete('chat/history', [ChatController::class, 'clearHistory']);
 
     // ── File upload ───────────────────────────────────────────────────────────
     Route::post('upload', [UploadController::class, 'store']);

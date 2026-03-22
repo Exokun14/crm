@@ -23,6 +23,7 @@ services:
             - sail
         depends_on:
             - mysql
+            - ollama
     mysql:
         image: 'mysql:8.4'
         ports:
@@ -60,11 +61,24 @@ services:
         depends_on:
             - mysql
         networks:
-            - sail  # ← this was missing before!
+            - sail
+
+    ollama:
+        image: ollama/ollama
+        container_name: ollama
+        ports:
+            - '11434:11434'
+        volumes:
+            - sail-ollama:/root/.ollama
+        networks:
+            - sail
+        restart: unless-stopped
 
 networks:
     sail:
         driver: bridge
 volumes:
     sail-mysql:
+        driver: local
+    sail-ollama:
         driver: local
