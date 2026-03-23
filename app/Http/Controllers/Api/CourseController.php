@@ -33,8 +33,10 @@ class CourseController extends Controller
             $query->where('stage', $request->stage);
         }
 
-        // Exclude templates by default unless explicitly requested
+        // Client-facing: only published+active. Admin bypasses with include_templates=true or stage=X.
         if (!$request->has('stage') && !$request->boolean('include_templates')) {
+            $query->where('stage', 'published')->where('active', 1);
+        } elseif (!$request->boolean('include_templates')) {
             $query->where('stage', '!=', 'template');
         }
 
@@ -58,10 +60,10 @@ class CourseController extends Controller
             $course->modules   = [];
 
             $p = $progressMap->get($course->id);
-            $course->enrolled   = $p ? (bool) $p->enrolled  : false;
-            $course->progress   = $p ? (int)  $p->progress  : 0;
-            $course->completed  = $p ? (bool) $p->completed : false;
-            $course->time_spent = $p ? (int)  $p->time_spent : 0;
+            $course->progress   = $p ? (int)  ($p->progress   ?? 0) : 0;
+            $course->enrolled   = $p ? (bool) ($p->enrolled   ?? ($course->progress > 0)) : false;
+            $course->completed  = $p ? (bool) ($p->completed  ?? ($course->progress >= 100)) : false;
+            $course->time_spent = $p ? (int)  ($p->time_spent ?? 0) : 0;
         }
 
         Log::channel('stderr')->info('[CourseController@index] ✅ Returning ' . $courses->count() . ' courses for user_id=' . $userId);
@@ -87,10 +89,10 @@ class CourseController extends Controller
 
         $p = DB::table('user_course_progress')
             ->where('user_id', $userId)->where('course_id', $id)->first();
-        $course->enrolled   = $p ? (bool) $p->enrolled  : false;
-        $course->progress   = $p ? (int)  $p->progress  : 0;
-        $course->completed  = $p ? (bool) $p->completed : false;
-        $course->time_spent = $p ? (int)  $p->time_spent : 0;
+        $course->progress   = $p ? (int)  ($p->progress   ?? 0) : 0;
+        $course->enrolled   = $p ? (bool) ($p->enrolled   ?? ($course->progress > 0)) : false;
+        $course->completed  = $p ? (bool) ($p->completed  ?? ($course->progress >= 100)) : false;
+        $course->time_spent = $p ? (int)  ($p->time_spent ?? 0) : 0;
 
         Log::channel('stderr')->info('[CourseController@show] ✅ modules=' . count($course->modules));
         return response()->json($course);
