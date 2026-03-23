@@ -19,6 +19,8 @@ class CourseController extends Controller
     {
         Log::channel('stderr')->info('[CourseController@index] ▶ params: ' . json_encode($request->all()));
 
+        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
+
         $query = DB::table('courses');
 
         if ($request->filled('category') && $request->category !== 'All') {
@@ -45,19 +47,31 @@ class CourseController extends Controller
 
         $courses = $query->get();
 
+        // Fetch this user's progress for all courses in one query
+        $progressMap = DB::table('user_course_progress')
+            ->where('user_id', $userId)
+            ->get()
+            ->keyBy('course_id');
+
         foreach ($courses as $course) {
-            $course->companies = $this->getCourseCompanies($course->id);
+            $course->companies = $this->getCourseCompanyNames($course->id);
             $course->modules   = [];
+
+            $p = $progressMap->get($course->id);
+            $course->enrolled   = $p ? (bool) $p->enrolled  : false;
+            $course->progress   = $p ? (int)  $p->progress  : 0;
+            $course->completed  = $p ? (bool) $p->completed : false;
+            $course->time_spent = $p ? (int)  $p->time_spent : 0;
         }
 
-        Log::channel('stderr')->info('[CourseController@index] ✅ Returning ' . $courses->count() . ' courses');
+        Log::channel('stderr')->info('[CourseController@index] ✅ Returning ' . $courses->count() . ' courses for user_id=' . $userId);
         return response()->json($courses);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // GET /courses/{id}
     // ─────────────────────────────────────────────────────────────────────────
-    public function show($id)
+    public function show(Request $request, $id)
     {
         Log::channel('stderr')->info('[CourseController@show] ▶ id=' . $id);
 
@@ -67,8 +81,16 @@ class CourseController extends Controller
             return response()->json(['error' => 'Course not found'], 404);
         }
 
-        $course->companies = $this->getCourseCompanies($id);
-        $course->modules   = $this->getCourseModules($id);
+        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
+        $course->companies = $this->getCourseCompanyNames($id);
+        $course->modules   = $this->getCourseModulesForUser($id, $userId);
+
+        $p = DB::table('user_course_progress')
+            ->where('user_id', $userId)->where('course_id', $id)->first();
+        $course->enrolled   = $p ? (bool) $p->enrolled  : false;
+        $course->progress   = $p ? (int)  $p->progress  : 0;
+        $course->completed  = $p ? (bool) $p->completed : false;
+        $course->time_spent = $p ? (int)  $p->time_spent : 0;
 
         Log::channel('stderr')->info('[CourseController@show] ✅ modules=' . count($course->modules));
         return response()->json($course);
@@ -183,6 +205,12 @@ class CourseController extends Controller
     {
         $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
 
+        // Guard: if user doesn't exist, skip progress tracking silently
+        if (!DB::table('users')->where('id', $userId)->exists()) {
+            Log::channel('stderr')->warning('[updateProgress] ⚠️ user_id=' . $userId . ' not found in users table — skipping progress');
+            return response()->json(['message' => 'Progress skipped (user not found)']);
+        }
+
         $validated = $request->validate([
             'progress'   => 'required|numeric|min:0|max:100',
             'enrolled'   => 'sometimes|nullable',
@@ -243,48 +271,75 @@ class CourseController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     public function updateModules(Request $request, $id)
     {
+        Log::channel('stderr')->info('[updateModules] ▶ called for course id=' . $id);
+        Log::channel('stderr')->info('[updateModules] 📦 raw payload: ' . json_encode($request->all()));
+
         $validated = $request->validate([
             'modules' => 'required|array',
         ]);
 
+        Log::channel('stderr')->info('[updateModules] ✅ validated. module count=' . count($validated['modules']));
+
         if (!DB::table('courses')->where('id', $id)->exists()) {
+            Log::channel('stderr')->error('[updateModules] ❌ course not found id=' . $id);
             return response()->json(['error' => 'Course not found'], 404);
         }
 
-        // Replace all modules + chapters (chapters cascade via FK)
-        DB::table('modules')->where('course_id', $id)->delete();
+        Log::channel('stderr')->info('[updateModules] ✅ course exists. starting transaction...');
 
         $savedModules  = 0;
         $savedChapters = 0;
 
-        foreach ($validated['modules'] as $index => $moduleData) {
-            $moduleId = DB::table('modules')->insertGetId([
-                'course_id'  => $id,
-                'title'      => $moduleData['title'],
-                'done'       => $moduleData['done'] ?? false,
-                'order'      => $index,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-            $savedModules++;
+        try {
+            DB::transaction(function () use ($id, $validated, &$savedModules, &$savedChapters) {
+                Log::channel('stderr')->info('[updateModules] 🔄 inside transaction');
+                // Delete chapters first to avoid FK constraint issues,
+                // then delete modules
+                $moduleIds = DB::table('modules')
+                    ->where('course_id', $id)
+                    ->pluck('id');
 
-            foreach ($moduleData['chapters'] ?? [] as $chIndex => $chapterData) {
-                DB::table('chapters')->insert([
-                    'module_id'  => $moduleId,
-                    'title'      => $chapterData['title'],
-                    'type'       => $chapterData['type'],
-                    'done'       => $chapterData['done'] ?? false,
-                    'order'      => $chIndex,
-                    'content'    => json_encode($chapterData['content'] ?? []),
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-                $savedChapters++;
-            }
+                if ($moduleIds->isNotEmpty()) {
+                    DB::table('chapters')->whereIn('module_id', $moduleIds)->delete();
+                }
+                DB::table('modules')->where('course_id', $id)->delete();
+
+                foreach ($validated['modules'] as $index => $moduleData) {
+                    Log::channel('stderr')->info('[updateModules] 📝 inserting module #' . $index . ' title=' . ($moduleData['title'] ?? '(empty)'));
+                    // Only insert columns that exist in the modules table
+                    $moduleId = DB::table('modules')->insertGetId([
+                        'course_id'  => $id,
+                        'title'      => $moduleData['title'] ?? 'Untitled Module',
+                        'order'      => $index,
+                        'created_at' => now(),
+                        'updated_at' => now(),
+                    ]);
+                    Log::channel('stderr')->info('[updateModules] ✅ module inserted id=' . $moduleId);
+                    $savedModules++;
+
+                    foreach ($moduleData['chapters'] ?? [] as $chIndex => $chapterData) {
+                        Log::channel('stderr')->info('[updateModules]   📄 inserting chapter #' . $chIndex . ' title=' . ($chapterData['title'] ?? '(empty)') . ' type=' . ($chapterData['type'] ?? 'lesson'));
+                        DB::table('chapters')->insert([
+                            'module_id'  => $moduleId,
+                            'title'      => $chapterData['title'] ?? 'Untitled Chapter',
+                            'type'       => $chapterData['type'] ?? 'lesson',
+                            'order'      => $chIndex,
+                            'content'    => json_encode($chapterData['content'] ?? []),
+                            'created_at' => now(),
+                            'updated_at' => now(),
+                        ]);
+                        Log::channel('stderr')->info('[updateModules]   ✅ chapter inserted');
+                        $savedChapters++;
+                    }
+                }
+            });
+        } catch (\Exception $e) {
+            Log::channel('stderr')->error('[CourseController@updateModules] ❌ Exception: ' . $e->getMessage());
+            return response()->json(['error' => 'Failed to save modules: ' . $e->getMessage()], 500);
         }
 
         Log::channel('stderr')->info('[CourseController@updateModules] ✅ ' . $savedModules . ' modules, ' . $savedChapters . ' chapters saved for course id=' . $id);
-        return response()->json(['message' => 'Modules updated successfully']);
+        return response()->json(['message' => 'Modules updated successfully', 'modules' => $savedModules, 'chapters' => $savedChapters]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -294,6 +349,12 @@ class CourseController extends Controller
     public function markChapterDone(Request $request, $chapterId)
     {
         $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
+
+        // Guard: if user doesn't exist, skip progress tracking silently
+        if (!DB::table('users')->where('id', $userId)->exists()) {
+            Log::channel('stderr')->warning('[markChapterDone] ⚠️ user_id=' . $userId . ' not found in users table — skipping');
+            return response()->json(['message' => 'Progress skipped (user not found)', 'module_done' => false]);
+        }
 
         $chapter = DB::table('chapters')->where('id', $chapterId)->first();
         if (!$chapter) {
@@ -355,7 +416,7 @@ class CourseController extends Controller
 
     private function getCourseCompanies($courseId): array
     {
-        // Returns company IDs (integers) — frontend expects number[] not name strings
+        // Returns company IDs (integers) — kept for backward-compat
         return DB::table('company_course')
             ->where('course_id', $courseId)
             ->pluck('company_id')
@@ -363,20 +424,50 @@ class CourseController extends Controller
             ->toArray();
     }
 
+    private function getCourseCompanyNames($courseId): array
+    {
+        // Returns company names as strings for the frontend
+        return DB::table('company_course')
+            ->join('company', 'company_course.company_id', '=', 'company.id')
+            ->where('company_course.course_id', $courseId)
+            ->pluck('company.company_name')
+            ->toArray();
+    }
+
     private function getCourseModules($courseId): array
+    {
+        return $this->getCourseModulesForUser($courseId, null);
+    }
+
+    private function getCourseModulesForUser($courseId, $userId): array
     {
         $modules = DB::table('modules')
             ->where('course_id', $courseId)
             ->orderBy('order')
             ->get();
 
+        // Pre-fetch all chapter progress for this user in one query
+        $doneChapterIds = collect();
+        if ($userId) {
+            $moduleIds = $modules->pluck('id');
+            $chapterIds = DB::table('chapters')
+                ->whereIn('module_id', $moduleIds)
+                ->pluck('id');
+            $doneChapterIds = DB::table('user_chapter_progress')
+                ->where('user_id', $userId)
+                ->whereIn('chapter_id', $chapterIds)
+                ->where('done', true)
+                ->pluck('chapter_id');
+        }
+
         foreach ($modules as $module) {
             $module->chapters = DB::table('chapters')
                 ->where('module_id', $module->id)
                 ->orderBy('order')
                 ->get()
-                ->map(function ($chapter) {
+                ->map(function ($chapter) use ($doneChapterIds) {
                     $chapter->content = json_decode($chapter->content, true);
+                    $chapter->done    = $doneChapterIds->contains($chapter->id);
                     return $chapter;
                 })
                 ->toArray();

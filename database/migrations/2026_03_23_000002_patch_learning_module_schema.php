@@ -13,13 +13,13 @@ use Illuminate\Support\Facades\DB;
  * breaking anything that already exists.
  *
  * What this does:
- *  1. courses          — adds stage, thumb_emoji columns + missing indexes
- *  2. company_course   — creates pivot table if missing
- *  3. modules          — adds order column + composite index if missing
- *  4. chapters         — adds type column + indexes if missing
- *  5. activities       — adds media_* columns + indexes if missing
+ *  1. courses            — adds stage, thumb_emoji columns + missing indexes
+ *  2. company_course     — creates pivot table if missing
+ *  3. modules            — adds order column + composite index if missing
+ *  4. chapters           — adds type, order, content columns + indexes if missing
+ *  5. activities         — adds media_* columns (media_url varchar 500) + indexes
  *  6. chapter_activities — creates pivot table if missing
- *  7. user_course_progress — adds course_id FK, unique constraint, indexes
+ *  7. user_course_progress  — adds course_id FK, unique constraint, indexes
  *  8. user_chapter_progress — creates if missing
  *  9. user_module_progress  — creates if missing
  * 10. settings_categories  — creates + seeds if missing
@@ -40,7 +40,6 @@ return new class extends Migration
             }
         });
 
-        // Add indexes only if they don't already exist
         $this->addIndexSafe('courses', 'stage',           'courses_stage_index');
         $this->addIndexSafe('courses', 'active',          'courses_active_index');
         $this->addIndexSafe('courses', 'cat',             'courses_cat_index');
@@ -89,8 +88,12 @@ return new class extends Migration
 
         // ── 5. activities ─────────────────────────────────────────────────────
         Schema::table('activities', function (Blueprint $table) {
+            if (!Schema::hasColumn('activities', 'data')) {
+                $table->json('data')->nullable()->after('status');
+            }
+            // FIX: varchar(500) — CDN/video URLs regularly exceed 255 chars
             if (!Schema::hasColumn('activities', 'media_url')) {
-                $table->string('media_url')->nullable()->after('data');
+                $table->string('media_url', 500)->nullable()->after('data');
             }
             if (!Schema::hasColumn('activities', 'media_type')) {
                 $table->enum('media_type', ['image', 'video', 'file'])
@@ -98,9 +101,6 @@ return new class extends Migration
             }
             if (!Schema::hasColumn('activities', 'media_name')) {
                 $table->string('media_name')->nullable()->after('media_type');
-            }
-            if (!Schema::hasColumn('activities', 'data')) {
-                $table->json('data')->nullable()->after('status');
             }
         });
         $this->addIndexSafe('activities', 'status', 'activities_status_index');
@@ -125,7 +125,6 @@ return new class extends Migration
 
         // ── 7. user_course_progress ───────────────────────────────────────────
         Schema::table('user_course_progress', function (Blueprint $table) {
-            // Add course_id FK column if the table was using a string/name before
             if (!Schema::hasColumn('user_course_progress', 'course_id')) {
                 $table->unsignedBigInteger('course_id')->nullable()->after('user_id');
             }
@@ -137,21 +136,17 @@ return new class extends Migration
             }
         });
 
-        // Add FK on course_id if not already there
         $this->addForeignKeySafe(
             'user_course_progress',
             'course_id',
             'user_course_progress_course_id_foreign',
             'courses', 'id'
         );
-
-        // Add UNIQUE(user_id, course_id) if not already there
         $this->addUniqueConstraintSafe(
             'user_course_progress',
             ['user_id', 'course_id'],
             'user_course_progress_user_id_course_id_unique'
         );
-
         $this->addCompositeIndexSafe(
             'user_course_progress',
             ['user_id', 'status'],
@@ -208,7 +203,6 @@ return new class extends Migration
             });
         }
 
-        // Seed only the rows that don't exist yet
         $defaults = [
             'POS Training', 'Food Safety', 'Customer Service',
             'HR & Compliance', 'Operations',
@@ -224,13 +218,11 @@ return new class extends Migration
 
     public function down(): void
     {
-        // Only drop things this migration created — don't touch pre-existing tables
         Schema::dropIfExists('user_module_progress');
         Schema::dropIfExists('user_chapter_progress');
         Schema::dropIfExists('chapter_activities');
         Schema::dropIfExists('company_course');
 
-        // Reverse column additions on pre-existing tables
         Schema::table('user_course_progress', function (Blueprint $table) {
             $this->dropForeignIfExists('user_course_progress', 'user_course_progress_course_id_foreign');
             $this->dropColumnIfExists('user_course_progress', 'course_id');
@@ -268,9 +260,7 @@ return new class extends Migration
             Schema::table($table, function (Blueprint $t) use ($column, $indexName) {
                 $t->index($column, $indexName);
             });
-        } catch (\Exception $e) {
-            // Index already exists — safe to ignore
-        }
+        } catch (\Exception $e) {}
     }
 
     private function addCompositeIndexSafe(string $table, array $columns, string $indexName): void
@@ -279,9 +269,7 @@ return new class extends Migration
             Schema::table($table, function (Blueprint $t) use ($columns, $indexName) {
                 $t->index($columns, $indexName);
             });
-        } catch (\Exception $e) {
-            // Already exists
-        }
+        } catch (\Exception $e) {}
     }
 
     private function addUniqueConstraintSafe(string $table, array $columns, string $indexName): void
@@ -290,9 +278,7 @@ return new class extends Migration
             Schema::table($table, function (Blueprint $t) use ($columns, $indexName) {
                 $t->unique($columns, $indexName);
             });
-        } catch (\Exception $e) {
-            // Already exists
-        }
+        } catch (\Exception $e) {}
     }
 
     private function addForeignKeySafe(
@@ -307,9 +293,7 @@ return new class extends Migration
                 $t->foreign($column, $fkName)
                   ->references($refColumn)->on($refTable)->onDelete('cascade');
             });
-        } catch (\Exception $e) {
-            // FK already exists or column is nullable with no data yet
-        }
+        } catch (\Exception $e) {}
     }
 
     private function dropColumnIfExists(string $table, string $column): void
@@ -323,8 +307,6 @@ return new class extends Migration
     {
         try {
             Schema::table($table, fn (Blueprint $t) => $t->dropForeign($fkName));
-        } catch (\Exception $e) {
-            // Didn't exist
-        }
+        } catch (\Exception $e) {}
     }
 };

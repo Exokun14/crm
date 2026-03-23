@@ -25,6 +25,9 @@ use Illuminate\Support\Facades\DB;
  *
  * 5. chapters.content stays JSON but type is a proper enum column with an
  *    index — filter chapters by type without scanning the content blob.
+ *
+ * 6. media_url is varchar(500) — real-world video/CDN URLs regularly exceed
+ *    the 255-char limit that the LMS schema used.
  */
 return new class extends Migration
 {
@@ -45,11 +48,10 @@ return new class extends Migration
             ])->default('draft');
             $table->timestamps();
 
-            // FIX 4: indexes for catalog filter queries
             $table->index('stage');
             $table->index('active');
             $table->index('cat');
-            $table->index(['stage', 'active']);   // most common combined filter
+            $table->index(['stage', 'active']);
         });
 
         // ── company_course pivot ──────────────────────────────────────────────
@@ -84,12 +86,12 @@ return new class extends Migration
             $table->string('title');
             $table->enum('type', ['lesson', 'quiz', 'assessment'])->default('lesson');
             $table->unsignedInteger('order')->default(0);
-            $table->json('content')->nullable();   // { body, questions, media, passingScore }
+            $table->json('content')->nullable();
             $table->timestamps();
 
             $table->foreign('module_id')->references('id')->on('modules')->onDelete('cascade');
             $table->index(['module_id', 'order']);
-            $table->index('type');   // filter by type without touching the JSON blob
+            $table->index('type');
         });
 
         // ── activities ────────────────────────────────────────────────────────
@@ -102,7 +104,8 @@ return new class extends Migration
             $table->string('title');
             $table->enum('status', ['draft', 'published'])->default('draft');
             $table->json('data')->nullable();
-            $table->string('media_url')->nullable();
+            // FIX: varchar(500) — CDN/video URLs regularly exceed 255 chars
+            $table->string('media_url', 500)->nullable();
             $table->enum('media_type', ['image', 'video', 'file'])->nullable();
             $table->string('media_name')->nullable();
             $table->timestamps();
@@ -111,7 +114,7 @@ return new class extends Migration
             $table->index('type');
         });
 
-        // FIX 3: chapter_activities pivot anchors activities to chapters
+        // ── chapter_activities pivot ──────────────────────────────────────────
         Schema::create('chapter_activities', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('chapter_id');
@@ -136,8 +139,6 @@ return new class extends Migration
         });
 
         // ── user_course_progress ──────────────────────────────────────────────
-        // FIX 1: course_id FK replaces course name string
-        // FIX 5: UNIQUE(user_id, course_id) prevents duplicate progress rows
         Schema::create('user_course_progress', function (Blueprint $table) {
             $table->id();
             $table->integer('user_id');
@@ -147,17 +148,15 @@ return new class extends Migration
             $table->date('completed')->nullable();
             $table->enum('status', ['Not Started', 'In Progress', 'Completed'])
                   ->default('Not Started');
-            $table->unsignedInteger('time_spent')->default(0);   // minutes
+            $table->unsignedInteger('time_spent')->default(0);
             $table->integer('assessment_score')->nullable();
             $table->timestamps();
 
-            // FIX 5: one row per user per course — safe to upsert
             $table->unique(['user_id', 'course_id']);
 
             $table->foreign('user_id')->references('id')->on('users')->onDelete('cascade');
             $table->foreign('course_id')->references('id')->on('courses')->onDelete('cascade');
 
-            // reporting queries
             $table->index(['user_id', 'status']);
             $table->index('course_id');
         });
