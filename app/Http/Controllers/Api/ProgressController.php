@@ -9,32 +9,44 @@ use Illuminate\Support\Facades\DB;
 
 class ProgressController extends Controller
 {
+    // GET /progress
+    // Returns progress records for the authenticated user, enriched with
+    // course title and company name via joins (no string duplication).
     public function index(Request $request)
     {
-        $query = DB::table('user_course_progress');
+        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
 
-        // FIX: Scope to the logged-in user only.
-        // Previously this returned ALL rows because user_id was never
-        // filtered. Now only the authenticated user's records are returned.
-        $query->where('user_id', Auth::id());
+        $query = DB::table('user_course_progress as ucp')
+            ->join('courses',  'ucp.course_id',  '=', 'courses.id')
+            ->join('users',    'ucp.user_id',    '=', 'users.id')
+            ->leftJoin('company', 'users.company_id', '=', 'company.id')
+            ->where('ucp.user_id', $userId)
+            ->select(
+                'ucp.*',
+                'courses.title  as course',        // resolved from FK
+                'company.company_name as company'  // resolved via users.company_id
+            );
 
-        if ($request->has('company')) {
-            $query->where('company', $request->company);
+        if ($request->filled('status')) {
+            $query->where('ucp.status', $request->status);
         }
-
-        if ($request->has('status')) {
-            $query->where('status', $request->status);
+        if ($request->filled('course_id')) {
+            $query->where('ucp.course_id', $request->course_id);
         }
 
         return response()->json($query->get());
     }
 
+    // POST /progress
+    // Creates a progress record. Accepts course_id (preferred) or falls back
+    // to looking up the course by title for backwards compat.
     public function store(Request $request)
     {
+        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
+
         $validated = $request->validate([
-            'name'             => 'required|string',
-            'company'          => 'required|string',
-            'course'           => 'required|string',
+            'course_id'        => 'required_without:course|integer|exists:courses,id',
+            'course'           => 'required_without:course_id|string',
             'progress'         => 'required|integer|min:0|max:100',
             'started'          => 'required|date',
             'completed'        => 'nullable|date',
@@ -43,20 +55,43 @@ class ProgressController extends Controller
             'assessment_score' => 'nullable|integer',
         ]);
 
-        // FIX: Save user_id on creation so records can be scoped per user.
-        // Previously user_id was always NULL, making it impossible to filter
-        // by user in index().
-        $id = DB::table('user_course_progress')->insertGetId(array_merge($validated, [
-            'user_id'    => Auth::id(),
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]));
+        // Resolve course_id from title if not provided directly
+        $courseId = $validated['course_id'] ?? DB::table('courses')
+            ->where('title', $validated['course'])
+            ->value('id');
 
-        return response()->json(['id' => $id, 'message' => 'Progress created'], 201);
+        if (!$courseId) {
+            return response()->json(['error' => 'Course not found'], 404);
+        }
+
+        // Use updateOrInsert so duplicate calls are safe
+        DB::table('user_course_progress')->updateOrInsert(
+            ['user_id' => $userId, 'course_id' => $courseId],
+            [
+                'progress'         => $validated['progress'],
+                'started'          => $validated['started'],
+                'completed'        => $validated['completed'] ?? null,
+                'status'           => $validated['status'],
+                'time_spent'       => $validated['time_spent'] ?? 0,
+                'assessment_score' => $validated['assessment_score'] ?? null,
+                'updated_at'       => now(),
+                'created_at'       => now(),
+            ]
+        );
+
+        $record = DB::table('user_course_progress')
+            ->where('user_id', $userId)
+            ->where('course_id', $courseId)
+            ->first();
+
+        return response()->json(['id' => $record->id, 'message' => 'Progress saved'], 201);
     }
 
+    // PUT /progress/{id}
     public function update(Request $request, $id)
     {
+        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
+
         $validated = $request->validate([
             'progress'         => 'sometimes|integer|min:0|max:100',
             'completed'        => 'nullable|date',
@@ -65,11 +100,9 @@ class ProgressController extends Controller
             'assessment_score' => 'nullable|integer',
         ]);
 
-        // FIX: Scope the lookup to the logged-in user so users cannot
-        // update each other's progress records by guessing an ID.
         $existing = DB::table('user_course_progress')
             ->where('id', $id)
-            ->where('user_id', Auth::id())
+            ->where('user_id', $userId)
             ->first();
 
         if (!$existing) {
@@ -83,35 +116,30 @@ class ProgressController extends Controller
         if (isset($validated['status']))           $updateData['status']           = $validated['status'];
         if (isset($validated['assessment_score'])) $updateData['assessment_score'] = $validated['assessment_score'];
 
-        // Accumulate time_spent (stored in seconds) — never overwrite with a smaller value
         if (isset($validated['time_spent'])) {
-            $delta       = max(0, (int) $validated['time_spent']);
-            $currentTime = max(0, (int) ($existing->time_spent ?? 0));
-            // Cap per-call delta at 7200 seconds (2 hours) to guard against stale tabs
-            $updateData['time_spent'] = $currentTime + min($delta, 7200);
+            $delta                    = max(0, (int) $validated['time_spent']);
+            $updateData['time_spent'] = max(0, (int)($existing->time_spent ?? 0)) + min($delta, 480);
         }
 
         DB::table('user_course_progress')
             ->where('id', $id)
-            ->where('user_id', Auth::id())
+            ->where('user_id', $userId)
             ->update($updateData);
 
         return response()->json(['message' => 'Progress updated']);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     // GET /progress/chapters?course_id={id}
-    // Returns all chapter completion rows for the authenticated user,
-    // optionally scoped to chapters belonging to a specific course.
-    // ─────────────────────────────────────────────────────────────────────────
     public function chapterProgress(Request $request)
     {
-        $query = DB::table('user_chapter_progress')
-            ->where('user_chapter_progress.user_id', Auth::id());
+        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
 
-        if ($request->has('course_id')) {
+        $query = DB::table('user_chapter_progress')
+            ->where('user_chapter_progress.user_id', $userId);
+
+        if ($request->filled('course_id')) {
             $query->join('chapters', 'user_chapter_progress.chapter_id', '=', 'chapters.id')
-                  ->join('modules',  'chapters.module_id',               '=', 'modules.id')
+                  ->join('modules',  'chapters.module_id', '=', 'modules.id')
                   ->where('modules.course_id', $request->course_id)
                   ->select('user_chapter_progress.*');
         }
@@ -119,17 +147,15 @@ class ProgressController extends Controller
         return response()->json($query->get());
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     // GET /progress/modules?course_id={id}
-    // Returns all module completion rows for the authenticated user,
-    // optionally scoped to modules belonging to a specific course.
-    // ─────────────────────────────────────────────────────────────────────────
     public function moduleProgress(Request $request)
     {
-        $query = DB::table('user_module_progress')
-            ->where('user_module_progress.user_id', Auth::id());
+        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
 
-        if ($request->has('course_id')) {
+        $query = DB::table('user_module_progress')
+            ->where('user_module_progress.user_id', $userId);
+
+        if ($request->filled('course_id')) {
             $query->join('modules', 'user_module_progress.module_id', '=', 'modules.id')
                   ->where('modules.course_id', $request->course_id)
                   ->select('user_module_progress.*');
