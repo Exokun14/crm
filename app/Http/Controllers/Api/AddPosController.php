@@ -58,12 +58,9 @@ class AddPosController extends Controller
      * Expected payload (FormData or JSON):
      *   branch_id        — int, required  (FK → branches.id)
      *   model            — string, required
-     *   ip_address       — string, required
+     *   serial_number    — string, required
      *   operating_system — string, required
-     *
-     * The pos_machines table does NOT store license_number, msa_start_date,
-     * or msa_end_date — those live on the branches table. The front-end
-     * displays them by joining through branch_id → branches.
+     *   warranty_date    — date (Y-m-d), nullable
      */
     public function store(Request $request)
     {
@@ -72,33 +69,36 @@ class AddPosController extends Controller
         $validated = $request->validate([
             'branch_id'        => 'required|integer|exists:branches,id',
             'model'            => 'required|string|max:100',
-            'ip_address'       => 'required|string|max:45',
+            'serial_number'    => 'required|string|max:100',
             'operating_system' => 'required|string|max:100',
+            'warranty_date'    => 'nullable|date',
         ]);
 
         try {
             $id = DB::table('pos_machines')->insertGetId([
                 'branch_id'        => (int) $validated['branch_id'],
                 'model'            => $validated['model'],
-                'ip_address'       => $validated['ip_address'],
+                'serial_number'    => $validated['serial_number'],
                 'operating_system' => $validated['operating_system'],
+                'warranty_date'    => $validated['warranty_date'] ?? null,
                 'created_at'       => now(),
                 'updated_at'       => now(),
             ]);
 
             Log::info('[AddPosController] POS machine inserted successfully', [
-                'inserted_id' => $id,
-                'branch_id'   => $validated['branch_id'],
-                'model'       => $validated['model'],
+                'inserted_id'   => $id,
+                'branch_id'     => $validated['branch_id'],
+                'model'         => $validated['model'],
+                'serial_number' => $validated['serial_number'],
             ]);
 
             // Return the full row so the front-end can hydrate its local state
             $machine = DB::table('pos_machines')->where('id', $id)->first();
 
             return response()->json([
-                'success'    => true,
-                'message'    => 'POS machine created successfully.',
-                'id'         => $id,
+                'success'     => true,
+                'message'     => 'POS machine created successfully.',
+                'id'          => $id,
                 'pos_machine' => $machine,
             ], 201);
 
@@ -126,8 +126,9 @@ class AddPosController extends Controller
 
         $validated = $request->validate([
             'model'            => 'sometimes|required|string|max:100',
-            'ip_address'       => 'sometimes|required|string|max:45',
+            'serial_number'    => 'sometimes|required|string|max:100',
             'operating_system' => 'sometimes|required|string|max:100',
+            'warranty_date'    => 'sometimes|nullable|date',
         ]);
 
         try {
@@ -136,10 +137,15 @@ class AddPosController extends Controller
                 ->update(array_merge($validated, ['updated_at' => now()]));
 
             if ($affected === 0) {
-                return response()->json([
-                    'success' => false,
-                    'message' => "No POS machine found with id {$id}, or data unchanged.",
-                ], 404);
+                // Check if row exists at all
+                $exists = DB::table('pos_machines')->where('id', $id)->exists();
+                if (!$exists) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => "No POS machine found with id {$id}.",
+                    ], 404);
+                }
+                // Row exists but data was unchanged — still a success
             }
 
             $machine = DB::table('pos_machines')->where('id', $id)->first();
