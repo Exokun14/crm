@@ -13,6 +13,10 @@ use Illuminate\Support\Facades\Log;
  * POST   /api/ai/chat          — send a message, get AI reply
  * GET    /api/ai/chat/history  — load persisted history
  * POST   /api/ai/chat/clear    — soft-archive history
+ * GET    /api/ai/chat/suggestions — dynamic suggestion chips
+ *
+ * Add to routes/api.php:
+ *   Route::get('ai/chat/suggestions', [AIChatController::class, 'suggestions']);
  *
  * Config:  config/ai_config.php
  * Training data: storage/ai_training/*.txt or *.md
@@ -234,15 +238,35 @@ class AIChatController extends Controller
         $progress = DB::table('user_course_progress as ucp')
             ->join('courses as co', 'co.id', '=', 'ucp.course_id')
             ->where('ucp.user_id', $userId)
-            ->select('co.title', 'co.cat', 'ucp.progress', 'ucp.status', 'ucp.completed', 'ucp.time_spent')
+            ->select('co.id as course_id', 'co.title', 'co.cat', 'ucp.progress', 'ucp.status', 'ucp.completed', 'ucp.time_spent')
             ->get();
 
-        $startedTitles = $progress->pluck('title')->toArray();
-        $available = DB::table('courses')
-            ->where('stage', 'published')->where('active', 1)
-            ->whereNotIn('title', $startedTitles)
-            ->select('title', 'cat', 'time')
-            ->limit(10)->get();
+        $startedIds    = $progress->pluck('course_id')->toArray();
+
+        // Scope available courses to the user's company via company_courses pivot (or fall back to all published)
+        $user2         = DB::table('users as u')
+            ->leftJoin('company as c', 'c.id', '=', 'u.company_id')
+            ->where('u.id', $userId)
+            ->select('u.company_id')
+            ->first();
+
+        $companyId2 = $user2?->company_id;
+
+        $availableQuery = DB::table('courses as co');
+
+        // If company_courses pivot table exists, scope to company
+        if ($companyId2 && DB::getSchemaBuilder()->hasTable('company_courses')) {
+            $availableQuery->join('company_courses as cc', 'cc.course_id', '=', 'co.id')
+                ->where('cc.company_id', $companyId2);
+        }
+
+        $available = $availableQuery
+            ->where('co.stage', 'published')
+            ->where('co.active', 1)
+            ->whereNotIn('co.id', $startedIds ?: [0])
+            ->select('co.id', 'co.title', 'co.cat', 'co.time')
+            ->limit(10)
+            ->get();
 
         return ['type' => 'user', 'user' => $user, 'progress' => $progress, 'available' => $available];
     }
@@ -333,6 +357,9 @@ class AIChatController extends Controller
 
         // Live user context — framed naturally, no database language
         $prompt .= "=== USER LEARNING PROFILE (always prioritize this — speak about it naturally, never technically) ===\n";
+        $prompt .= "STRICT DATA RULE: Everything you say about courses, progress, and available content MUST come ONLY from the data listed below.\n";
+        $prompt .= "Do NOT invent course names, completion numbers, or recommendations that are not explicitly listed here.\n";
+        $prompt .= "If a course or detail is not in this list, it does not exist for this user — never assume or guess.\n\n";
 
         if ($context['type'] === 'user') {
             $user     = $context['user'];
@@ -433,7 +460,54 @@ class AIChatController extends Controller
         return trim($data['message']['content'] ?? 'Sorry, I could not generate a response.');
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── GET /api/ai/chat/suggestions ─────────────────────────────────────────
+    public function suggestions(Request $request)
+    {
+        $userId      = (int) $request->header('X-User-Id', 0);
+        $accessLevel = $request->header('X-Access-Level', 'user');
+
+        if (!$userId) return response()->json(['error' => 'Unauthorized'], 401);
+
+        $isManager = in_array($accessLevel, ['manager', 'admin', 'super_admin', 'system_admin']);
+
+        if ($isManager) {
+            $suggestions = [
+                "How is my team doing with their learning?",
+                "Who has completed the most courses?",
+                "What courses are available for my team?",
+            ];
+        } else {
+            // Build dynamic suggestions based on user's actual progress
+            $progress = DB::table('user_course_progress as ucp')
+                ->join('courses as co', 'co.id', '=', 'ucp.course_id')
+                ->where('ucp.user_id', $userId)
+                ->where('ucp.progress', '<', 100)
+                ->orderBy('ucp.progress', 'desc')
+                ->select('co.title', 'ucp.progress')
+                ->first();
+
+            $hasProgress = DB::table('user_course_progress')
+                ->where('user_id', $userId)->exists();
+
+            $suggestions = [];
+
+            if ($progress) {
+                $suggestions[] = "How am I doing with {$progress->title}?";
+            } else {
+                $suggestions[] = "What courses should I focus on?";
+            }
+
+            $suggestions[] = $hasProgress
+                ? "How am I doing with my progress?"
+                : "Where should I start learning?";
+
+            $suggestions[] = "What's available for me to learn?";
+        }
+
+        return response()->json(['success' => true, 'data' => $suggestions]);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────────
 
     private function saveMessage(int $userId, string $role, string $content, ?string $sessionId = null): void
     {

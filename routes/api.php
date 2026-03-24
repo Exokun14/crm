@@ -125,6 +125,7 @@ Route::post('/course-icons',              [CourseIconController::class, 'store']
 Route::delete('/course-icons/{id}',       [CourseIconController::class, 'destroy']);
 
 /* ── AI Chat ──────────────────────────────────────────────────── */
-Route::post('/ai/chat',         [AIChatController::class, 'chat']);
-Route::get('/ai/chat/history',  [AIChatController::class, 'history']);
-Route::post('/ai/chat/clear',   [AIChatController::class, 'clear']);
+Route::get('/ai/chat/suggestions',  [AIChatController::class, 'suggestions']); // ← ADDED
+Route::post('/ai/chat',             [AIChatController::class, 'chat']);
+Route::get('/ai/chat/history',      [AIChatController::class, 'history']);
+Route::post('/ai/chat/clear',       [AIChatController::class, 'clear']);
