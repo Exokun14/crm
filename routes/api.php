@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\ClientController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\UploadController;
 use App\Http\Controllers\Api\CourseIconController;
+use App\Http\Controllers\Api\AIChatController;
 
 Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
     return $request->user();
@@ -122,3 +123,8 @@ Route::post('/upload',                    [UploadController::class, 'store']);
 Route::get('/course-icons',               [CourseIconController::class, 'index']);
 Route::post('/course-icons',              [CourseIconController::class, 'store']);
 Route::delete('/course-icons/{id}',       [CourseIconController::class, 'destroy']);
+
+/* ── AI Chat ──────────────────────────────────────────────────── */
+Route::post('/ai/chat',         [AIChatController::class, 'chat']);
+Route::get('/ai/chat/history',  [AIChatController::class, 'history']);
+Route::post('/ai/chat/clear',   [AIChatController::class, 'clear']);
