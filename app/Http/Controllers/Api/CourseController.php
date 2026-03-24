@@ -17,85 +17,87 @@ class CourseController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     public function index(Request $request)
     {
-        Log::channel('stderr')->info('[CourseController@index] ▶ params: ' . json_encode($request->all()));
-
-        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
+        Log::channel('stderr')->info('[CourseController@index] ▶ Request params: ' . json_encode($request->all()));
+        Log::channel('stderr')->info('[CourseController@index] include_templates param: ' . var_export($request->boolean('include_templates'), true));
 
         $query = DB::table('courses');
 
-        if ($request->filled('category') && $request->category !== 'All') {
+        if ($request->has('category') && $request->category !== 'All') {
             $query->where('cat', $request->category);
+            Log::channel('stderr')->info('[CourseController@index] Filter: cat = ' . $request->category);
         }
         if ($request->has('active')) {
             $query->where('active', $request->active);
+            Log::channel('stderr')->info('[CourseController@index] Filter: active = ' . $request->active);
         }
         if ($request->has('stage')) {
             $query->where('stage', $request->stage);
+            Log::channel('stderr')->info('[CourseController@index] Filter: stage = ' . $request->stage);
         }
 
-        // Client-facing: only published+active. Admin bypasses with include_templates=true or stage=X.
         if (!$request->has('stage') && !$request->boolean('include_templates')) {
-            $query->where('stage', 'published')->where('active', 1);
-        } elseif (!$request->boolean('include_templates')) {
             $query->where('stage', '!=', 'template');
+            Log::channel('stderr')->info('[CourseController@index] ⚠️  Excluding templates (include_templates not set)');
+        } else {
+            Log::channel('stderr')->info('[CourseController@index] ✅ Including templates in results');
         }
 
-        // FIX: filter by company_id using company_course pivot
-        if ($request->filled('client_id')) {
+        if ($request->has('client_id')) {
             $query->join('company_course', 'courses.id', '=', 'company_course.course_id')
                   ->where('company_course.company_id', $request->client_id)
                   ->select('courses.*');
+            Log::channel('stderr')->info('[CourseController@index] Filter: client_id/company_id = ' . $request->client_id);
         }
 
         $courses = $query->get();
 
-        // Fetch this user's progress for all courses in one query
-        $progressMap = DB::table('user_course_progress')
-            ->where('user_id', $userId)
-            ->get()
-            ->keyBy('course_id');
+        // Log stage breakdown
+        $stageBreakdown = $courses->groupBy('stage')->map->count();
+        Log::channel('stderr')->info('[CourseController@index] ✅ Returning ' . $courses->count() . ' courses. Stage breakdown: ' . json_encode($stageBreakdown));
 
         foreach ($courses as $course) {
-            $course->companies = $this->getCourseCompanyNames($course->id);
+            $course->companies = $this->getCourseCompanies($course->id);
             $course->modules   = [];
-
-            $p = $progressMap->get($course->id);
-            $course->progress   = $p ? (int)  ($p->progress   ?? 0) : 0;
-            $course->enrolled   = $p ? (bool) ($p->enrolled   ?? ($course->progress > 0)) : false;
-            $course->completed  = $p ? (bool) ($p->completed  ?? ($course->progress >= 100)) : false;
-            $course->time_spent = $p ? (int)  ($p->time_spent ?? 0) : 0;
         }
 
-        Log::channel('stderr')->info('[CourseController@index] ✅ Returning ' . $courses->count() . ' courses for user_id=' . $userId);
         return response()->json($courses);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // GET /courses/{id}
+    // GET /user/courses
     // ─────────────────────────────────────────────────────────────────────────
-    public function show(Request $request, $id)
+    public function getUserCourses(Request $request)
     {
-        Log::channel('stderr')->info('[CourseController@show] ▶ id=' . $id);
+        Log::channel('stderr')->info('[CourseController@getUserCourses] ▶ Called');
 
-        $course = DB::table('courses')->where('id', $id)->first();
+        $user = $request->user();
 
-        if (!$course) {
-            return response()->json(['error' => 'Course not found'], 404);
+        if (!$user) {
+            Log::channel('stderr')->error('[CourseController@getUserCourses] ❌ Unauthenticated');
+            return response()->json(['error' => 'Unauthenticated'], 401);
         }
 
-        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
-        $course->companies = $this->getCourseCompanyNames($id);
-        $course->modules   = $this->getCourseModulesForUser($id, $userId);
+        Log::channel('stderr')->info('[CourseController@getUserCourses] User: id=' . $user->id . ' role=' . $user->role . ' company_id=' . $user->company_id);
 
-        $p = DB::table('user_course_progress')
-            ->where('user_id', $userId)->where('course_id', $id)->first();
-        $course->progress   = $p ? (int)  ($p->progress   ?? 0) : 0;
-        $course->enrolled   = $p ? (bool) ($p->enrolled   ?? ($course->progress > 0)) : false;
-        $course->completed  = $p ? (bool) ($p->completed  ?? ($course->progress >= 100)) : false;
-        $course->time_spent = $p ? (int)  ($p->time_spent ?? 0) : 0;
+        if ($user->role === 'admin' || !$user->company_id) {
+            $courses = DB::table('courses')->where('stage', 'published')->get();
+        } else {
+            $courses = DB::table('courses')
+                ->join('company_course', 'courses.id', '=', 'company_course.course_id')
+                ->where('company_course.company_id', $user->company_id)
+                ->where('courses.stage', 'published')
+                ->select('courses.*')
+                ->get();
+        }
 
-        Log::channel('stderr')->info('[CourseController@show] ✅ modules=' . count($course->modules));
-        return response()->json($course);
+        Log::channel('stderr')->info('[CourseController@getUserCourses] ✅ Returning ' . $courses->count() . ' published courses');
+
+        foreach ($courses as $course) {
+            $course->companies = $this->getCourseCompanies($course->id);
+            $course->modules   = [];
+        }
+
+        return response()->json($courses);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -103,6 +105,8 @@ class CourseController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     public function store(Request $request)
     {
+        Log::channel('stderr')->info('[CourseController@store] ▶ Payload: ' . json_encode($request->all()));
+
         $validated = $request->validate([
             'title'       => 'required|string|max:255',
             'desc'        => 'nullable|string',
@@ -117,6 +121,8 @@ class CourseController extends Controller
         $stage  = $validated['stage'] ?? 'draft';
         $active = $stage === 'published';
 
+        Log::channel('stderr')->info('[CourseController@store] Creating course: title="' . $validated['title'] . '" stage=' . $stage);
+
         $courseId = DB::table('courses')->insertGetId([
             'title'       => $validated['title'],
             'desc'        => $validated['desc'] ?? '',
@@ -130,12 +136,36 @@ class CourseController extends Controller
             'updated_at'  => now(),
         ]);
 
+        Log::channel('stderr')->info('[CourseController@store] ✅ Created course id=' . $courseId);
+
         if (!empty($validated['companies'])) {
             $this->syncCompanies($courseId, $validated['companies']);
+            Log::channel('stderr')->info('[CourseController@store] Synced companies: ' . json_encode($validated['companies']));
         }
 
-        Log::channel('stderr')->info('[CourseController@store] ✅ Created course id=' . $courseId);
         return response()->json(['id' => $courseId, 'message' => 'Course created successfully'], 201);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // GET /courses/{id}
+    // ─────────────────────────────────────────────────────────────────────────
+    public function show($id)
+    {
+        Log::channel('stderr')->info('[CourseController@show] ▶ id=' . $id);
+
+        $course = DB::table('courses')->where('id', $id)->first();
+
+        if (!$course) {
+            Log::channel('stderr')->error('[CourseController@show] ❌ Course not found: id=' . $id);
+            return response()->json(['error' => 'Course not found'], 404);
+        }
+
+        $course->companies = $this->getCourseCompanies($id);
+        $course->modules   = $this->getCourseModules($id);
+
+        Log::channel('stderr')->info('[CourseController@show] ✅ Returning course id=' . $id . ' modules=' . count($course->modules) . ' stage=' . $course->stage);
+
+        return response()->json($course);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -143,6 +173,8 @@ class CourseController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     public function update(Request $request, $id)
     {
+        Log::channel('stderr')->info('[CourseController@update] ▶ id=' . $id . ' payload: ' . json_encode($request->all()));
+
         $validated = $request->validate([
             'title'       => 'sometimes|string|max:255',
             'desc'        => 'nullable|string',
@@ -156,7 +188,9 @@ class CourseController extends Controller
         ]);
 
         $existing = DB::table('courses')->where('id', $id)->first();
+
         if (!$existing) {
+            Log::channel('stderr')->error('[CourseController@update] ❌ Course not found: id=' . $id);
             return response()->json(['error' => 'Course not found'], 404);
         }
 
@@ -172,21 +206,24 @@ class CourseController extends Controller
         if (isset($validated['stage'])) {
             $updateData['stage']  = $validated['stage'];
             $updateData['active'] = $validated['stage'] === 'published';
+            Log::channel('stderr')->info('[CourseController@update] Stage change: ' . $existing->stage . ' → ' . $validated['stage']);
         } elseif (isset($validated['active'])) {
             $updateData['active'] = $validated['active'];
             $updateData['stage']  = $validated['active'] ? 'published' : 'unpublished';
+            Log::channel('stderr')->info('[CourseController@update] Active toggle → stage: ' . $updateData['stage']);
         }
 
         DB::table('courses')->where('id', $id)->update($updateData);
+        Log::channel('stderr')->info('[CourseController@update] ✅ Updated course id=' . $id . ' fields: ' . json_encode(array_keys($updateData)));
 
         if (array_key_exists('companies', $validated)) {
             DB::table('company_course')->where('course_id', $id)->delete();
             if (!empty($validated['companies'])) {
                 $this->syncCompanies($id, $validated['companies']);
+                Log::channel('stderr')->info('[CourseController@update] Synced companies: ' . json_encode($validated['companies']));
             }
         }
 
-        Log::channel('stderr')->info('[CourseController@update] ✅ Updated course id=' . $id);
         return response()->json(['message' => 'Course updated successfully']);
     }
 
@@ -195,74 +232,169 @@ class CourseController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     public function destroy($id)
     {
+        Log::channel('stderr')->info('[CourseController@destroy] ▶ Deleting course id=' . $id);
         DB::table('courses')->where('id', $id)->delete();
+        Log::channel('stderr')->info('[CourseController@destroy] ✅ Deleted course id=' . $id);
         return response()->json(['message' => 'Course deleted successfully']);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // POST /courses/{id}/clone
+    // ─────────────────────────────────────────────────────────────────────────
+    public function clone(Request $request, $id)
+    {
+        Log::channel('stderr')->info('[CourseController@clone] ▶ Cloning course id=' . $id);
+
+        $source = DB::table('courses')->where('id', $id)->first();
+
+        if (!$source) {
+            Log::channel('stderr')->error('[CourseController@clone] ❌ Source course not found: id=' . $id);
+            return response()->json(['error' => 'Source course not found'], 404);
+        }
+
+        $newId = DB::table('courses')->insertGetId([
+            'title'       => $source->title . ' (Copy)',
+            'desc'        => $source->desc,
+            'time'        => $source->time,
+            'cat'         => $source->cat,
+            'thumb'       => $source->thumb,
+            'thumb_emoji' => $source->thumb_emoji,
+            'active'      => false,
+            'stage'       => 'draft',
+            'created_at'  => now(),
+            'updated_at'  => now(),
+        ]);
+
+        Log::channel('stderr')->info('[CourseController@clone] ✅ Clone created: new id=' . $newId);
+
+        $assignments = DB::table('company_course')->where('course_id', $id)->get();
+        foreach ($assignments as $row) {
+            DB::table('company_course')->insert([
+                'course_id'   => $newId,
+                'company_id'  => $row->company_id,
+                'assigned_at' => now(),
+            ]);
+        }
+
+        $modules = DB::table('modules')->where('course_id', $id)->orderBy('order')->get();
+        Log::channel('stderr')->info('[CourseController@clone] Cloning ' . $modules->count() . ' modules');
+
+        foreach ($modules as $module) {
+            $newModuleId = DB::table('modules')->insertGetId([
+                'course_id'  => $newId,
+                'title'      => $module->title,
+                'done'       => false,
+                'order'      => $module->order,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            $chapters = DB::table('chapters')->where('module_id', $module->id)->orderBy('order')->get();
+            foreach ($chapters as $chapter) {
+                DB::table('chapters')->insert([
+                    'module_id'  => $newModuleId,
+                    'title'      => $chapter->title,
+                    'type'       => $chapter->type,
+                    'done'       => false,
+                    'order'      => $chapter->order,
+                    'content'    => $chapter->content,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+        }
+
+        $newCourse            = DB::table('courses')->where('id', $newId)->first();
+        $newCourse->companies = $this->getCourseCompanies($newId);
+        $newCourse->modules   = [];
+
+        return response()->json([
+            'id'      => $newId,
+            'course'  => $newCourse,
+            'message' => 'Course cloned successfully',
+        ], 201);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // PUT /courses/{id}/progress
-    // Upserts into user_course_progress — never touches the shared courses row.
+    //
+    // FIX: Previously wrote progress/completed/time_spent directly onto the
+    // shared `courses` row, meaning one user completing a course marked it
+    // complete for everyone. Now we upsert into user_course_progress so each
+    // user's progress is stored and read independently.
+    // The shared `courses` table is no longer touched here.
     // ─────────────────────────────────────────────────────────────────────────
     public function updateProgress(Request $request, $id)
     {
-        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
-
-        // Guard: if user doesn't exist, skip progress tracking silently
-        if (!DB::table('users')->where('id', $userId)->exists()) {
-            Log::channel('stderr')->warning('[updateProgress] ⚠️ user_id=' . $userId . ' not found in users table — skipping progress');
-            return response()->json(['message' => 'Progress skipped (user not found)']);
-        }
+        $userId = Auth::id();
+        Log::channel('stderr')->info('[CourseController@updateProgress] ▶ course_id=' . $id . ' user_id=' . $userId . ' payload: ' . json_encode($request->all()));
 
         $validated = $request->validate([
             'progress'   => 'required|numeric|min:0|max:100',
-            'enrolled'   => 'sometimes|nullable',
-            'completed'  => 'sometimes|nullable',
+            'enrolled'   => 'sometimes|nullable',   // accept 0/1/true/false
+            'completed'  => 'sometimes|nullable',   // accept 0/1/true/false
             'time_spent' => 'sometimes|numeric|min:0',
         ]);
 
         $progress    = (int) round((float) $validated['progress']);
-        $isCompleted = $progress >= 100
-            || in_array($validated['completed'] ?? null, [true, 1, '1', 'true'], true);
+        $isCompleted = $progress >= 100 || in_array($validated['completed'] ?? null, [true, 1, '1', 'true'], true);
 
+        // Look up the course title for the user_course_progress record
         $course = DB::table('courses')->where('id', $id)->first();
         if (!$course) {
             return response()->json(['error' => 'Course not found'], 404);
         }
 
-        // FIX: upsert by (user_id, course_id) — not by course name string
+        // Find any existing row for this user + course
         $existing = DB::table('user_course_progress')
-            ->where('user_id',  $userId)
-            ->where('course_id', $id)
+            ->where('user_id',   $userId)
+            ->where('course',    $course->title)
             ->first();
-
-        $status = $isCompleted ? 'Completed' : ($progress > 0 ? 'In Progress' : 'Not Started');
 
         if ($existing) {
             $updateData = [
                 'progress'   => $progress,
-                'status'     => $status,
+                'status'     => $isCompleted ? 'Completed' : ($progress > 0 ? 'In Progress' : 'Not Started'),
                 'updated_at' => now(),
             ];
+
             if ($isCompleted && !$existing->completed) {
                 $updateData['completed'] = now()->toDateString();
             }
+
+            // Accumulate time_spent (in minutes) — cap per-call delta at 480 min (8 hours)
             if (isset($validated['time_spent'])) {
                 $delta                    = max(0, (int) $validated['time_spent']);
-                $updateData['time_spent'] = max(0, (int)($existing->time_spent ?? 0)) + min($delta, 480);
+                $currentTime              = max(0, (int) ($existing->time_spent ?? 0));
+                $updateData['time_spent'] = $currentTime + min($delta, 480);
             }
-            DB::table('user_course_progress')->where('id', $existing->id)->update($updateData);
+
+            DB::table('user_course_progress')
+                ->where('id', $existing->id)
+                ->update($updateData);
+
+            Log::channel('stderr')->info('[CourseController@updateProgress] ✅ Updated user_course_progress id=' . $existing->id . ' progress=' . $progress);
         } else {
+            // First time this user touches this course — create the row
+            $timeSpent = isset($validated['time_spent'])
+                ? min(max(0, (int) $validated['time_spent']), 480)
+                : 0;
+
             DB::table('user_course_progress')->insert([
                 'user_id'    => $userId,
-                'course_id'  => $id,
+                'name'       => Auth::user()->name ?? '',
+                'company'    => Auth::user()->company?->name ?? '',
+                'course'     => $course->title,
                 'progress'   => $progress,
-                'status'     => $status,
+                'status'     => $isCompleted ? 'Completed' : ($progress > 0 ? 'In Progress' : 'Not Started'),
                 'started'    => now()->toDateString(),
                 'completed'  => $isCompleted ? now()->toDateString() : null,
-                'time_spent' => isset($validated['time_spent']) ? min(max(0, (int)$validated['time_spent']), 480) : 0,
+                'time_spent' => $timeSpent,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+
+            Log::channel('stderr')->info('[CourseController@updateProgress] ✅ Created user_course_progress for user=' . $userId . ' course=' . $course->title);
         }
 
         return response()->json(['message' => 'Progress updated successfully']);
@@ -273,103 +405,102 @@ class CourseController extends Controller
     // ─────────────────────────────────────────────────────────────────────────
     public function updateModules(Request $request, $id)
     {
-        Log::channel('stderr')->info('[updateModules] ▶ called for course id=' . $id);
-        Log::channel('stderr')->info('[updateModules] 📦 raw payload: ' . json_encode($request->all()));
+        Log::channel('stderr')->info('[CourseController@updateModules] ▶ course id=' . $id);
+        Log::channel('stderr')->info('[CourseController@updateModules] Raw payload keys: ' . json_encode(array_keys($request->all())));
 
         $validated = $request->validate([
             'modules' => 'required|array',
         ]);
 
-        Log::channel('stderr')->info('[updateModules] ✅ validated. module count=' . count($validated['modules']));
+        $moduleCount = count($validated['modules']);
+        Log::channel('stderr')->info('[CourseController@updateModules] Module count in request: ' . $moduleCount);
 
-        if (!DB::table('courses')->where('id', $id)->exists()) {
-            Log::channel('stderr')->error('[updateModules] ❌ course not found id=' . $id);
+        // Verify course exists
+        $courseExists = DB::table('courses')->where('id', $id)->exists();
+        if (!$courseExists) {
+            Log::channel('stderr')->error('[CourseController@updateModules] ❌ Course id=' . $id . ' does not exist!');
             return response()->json(['error' => 'Course not found'], 404);
         }
 
-        Log::channel('stderr')->info('[updateModules] ✅ course exists. starting transaction...');
+        // Delete existing modules (chapters cascade via FK)
+        $deletedModules = DB::table('modules')->where('course_id', $id)->count();
+        DB::table('modules')->where('course_id', $id)->delete();
+        Log::channel('stderr')->info('[CourseController@updateModules] Deleted ' . $deletedModules . ' existing modules');
 
-        $savedModules  = 0;
-        $savedChapters = 0;
+        $savedModules   = 0;
+        $savedChapters  = 0;
 
-        try {
-            DB::transaction(function () use ($id, $validated, &$savedModules, &$savedChapters) {
-                Log::channel('stderr')->info('[updateModules] 🔄 inside transaction');
-                // Delete chapters first to avoid FK constraint issues,
-                // then delete modules
-                $moduleIds = DB::table('modules')
-                    ->where('course_id', $id)
-                    ->pluck('id');
+        foreach ($validated['modules'] as $index => $moduleData) {
+            Log::channel('stderr')->info('[CourseController@updateModules] Inserting module ' . $index . ': "' . ($moduleData['title'] ?? 'UNTITLED') . '"');
 
-                if ($moduleIds->isNotEmpty()) {
-                    DB::table('chapters')->whereIn('module_id', $moduleIds)->delete();
-                }
-                DB::table('modules')->where('course_id', $id)->delete();
+            $moduleId = DB::table('modules')->insertGetId([
+                'course_id'  => $id,
+                'title'      => $moduleData['title'],
+                'done'       => $moduleData['done'] ?? false,
+                'order'      => $index,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+            $savedModules++;
 
-                foreach ($validated['modules'] as $index => $moduleData) {
-                    Log::channel('stderr')->info('[updateModules] 📝 inserting module #' . $index . ' title=' . ($moduleData['title'] ?? '(empty)'));
-                    // Only insert columns that exist in the modules table
-                    $moduleId = DB::table('modules')->insertGetId([
-                        'course_id'  => $id,
-                        'title'      => $moduleData['title'] ?? 'Untitled Module',
-                        'order'      => $index,
+            if (!empty($moduleData['chapters'])) {
+                foreach ($moduleData['chapters'] as $chIndex => $chapterData) {
+                    DB::table('chapters')->insert([
+                        'module_id'  => $moduleId,
+                        'title'      => $chapterData['title'],
+                        'type'       => $chapterData['type'],
+                        'done'       => $chapterData['done'] ?? false,
+                        'order'      => $chIndex,
+                        'content'    => json_encode($chapterData['content']),
                         'created_at' => now(),
                         'updated_at' => now(),
                     ]);
-                    Log::channel('stderr')->info('[updateModules] ✅ module inserted id=' . $moduleId);
-                    $savedModules++;
-
-                    foreach ($moduleData['chapters'] ?? [] as $chIndex => $chapterData) {
-                        Log::channel('stderr')->info('[updateModules]   📄 inserting chapter #' . $chIndex . ' title=' . ($chapterData['title'] ?? '(empty)') . ' type=' . ($chapterData['type'] ?? 'lesson'));
-                        DB::table('chapters')->insert([
-                            'module_id'  => $moduleId,
-                            'title'      => $chapterData['title'] ?? 'Untitled Chapter',
-                            'type'       => $chapterData['type'] ?? 'lesson',
-                            'order'      => $chIndex,
-                            'content'    => json_encode($chapterData['content'] ?? []),
-                            'created_at' => now(),
-                            'updated_at' => now(),
-                        ]);
-                        Log::channel('stderr')->info('[updateModules]   ✅ chapter inserted');
-                        $savedChapters++;
-                    }
+                    $savedChapters++;
                 }
-            });
-        } catch (\Exception $e) {
-            Log::channel('stderr')->error('[CourseController@updateModules] ❌ Exception: ' . $e->getMessage());
-            return response()->json(['error' => 'Failed to save modules: ' . $e->getMessage()], 500);
+            }
         }
 
-        Log::channel('stderr')->info('[CourseController@updateModules] ✅ ' . $savedModules . ' modules, ' . $savedChapters . ' chapters saved for course id=' . $id);
-        return response()->json(['message' => 'Modules updated successfully', 'modules' => $savedModules, 'chapters' => $savedChapters]);
+        Log::channel('stderr')->info('[CourseController@updateModules] ✅ Done. Saved: ' . $savedModules . ' modules, ' . $savedChapters . ' chapters for course id=' . $id);
+
+        return response()->json(['message' => 'Modules updated successfully']);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // PUT /chapters/{chapterId}/done
-    // Writes to per-user progress tables — never touches shared chapters row.
+    //
+    // FIX: Previously this wrote `done = true` directly onto the shared
+    // `chapters` and `modules` rows, meaning one user completing a chapter
+    // marked it done for every other user.
+    //
+    // Now we write into the per-user progress tables:
+    //   user_chapter_progress  (user_id, chapter_id, done)
+    //   user_module_progress   (user_id, module_id,  done)
+    //
+    // The shared `chapters.done` and `modules.done` columns are no longer
+    // touched here — they remain as authoring/admin flags only.
     // ─────────────────────────────────────────────────────────────────────────
     public function markChapterDone(Request $request, $chapterId)
     {
-        $userId = Auth::id() ?? (int) $request->header('X-User-Id', 1);
-
-        // Guard: if user doesn't exist, skip progress tracking silently
-        if (!DB::table('users')->where('id', $userId)->exists()) {
-            Log::channel('stderr')->warning('[markChapterDone] ⚠️ user_id=' . $userId . ' not found in users table — skipping');
-            return response()->json(['message' => 'Progress skipped (user not found)', 'module_done' => false]);
-        }
+        $userId = Auth::id();
+        Log::channel('stderr')->info('[CourseController@markChapterDone] ▶ chapterId=' . $chapterId . ' user_id=' . $userId);
 
         $chapter = DB::table('chapters')->where('id', $chapterId)->first();
+
         if (!$chapter) {
+            Log::channel('stderr')->error('[CourseController@markChapterDone] ❌ Chapter not found: id=' . $chapterId);
             return response()->json(['error' => 'Chapter not found'], 404);
         }
 
-        // Upsert user_chapter_progress
-        $exists = DB::table('user_chapter_progress')
-            ->where('user_id', $userId)->where('chapter_id', $chapterId)->exists();
+        // Upsert into user_chapter_progress (one row per user+chapter)
+        $existingChapterProgress = DB::table('user_chapter_progress')
+            ->where('user_id',    $userId)
+            ->where('chapter_id', $chapterId)
+            ->first();
 
-        if ($exists) {
+        if ($existingChapterProgress) {
             DB::table('user_chapter_progress')
-                ->where('user_id', $userId)->where('chapter_id', $chapterId)
+                ->where('user_id',    $userId)
+                ->where('chapter_id', $chapterId)
                 ->update(['done' => true, 'updated_at' => now()]);
         } else {
             DB::table('user_chapter_progress')->insert([
@@ -381,23 +512,34 @@ class CourseController extends Controller
             ]);
         }
 
-        // Auto-complete module if all its chapters are done for this user
-        $totalInModule = DB::table('chapters')->where('module_id', $chapter->module_id)->count();
-        $doneInModule  = DB::table('user_chapter_progress')
-            ->join('chapters', 'user_chapter_progress.chapter_id', '=', 'chapters.id')
-            ->where('user_chapter_progress.user_id', $userId)
-            ->where('chapters.module_id', $chapter->module_id)
-            ->where('user_chapter_progress.done', true)
+        Log::channel('stderr')->info('[CourseController@markChapterDone] ✅ user_chapter_progress upserted for user=' . $userId . ' chapter=' . $chapterId);
+
+        // Check if all chapters in this module are done FOR THIS USER
+        $totalInModule = DB::table('chapters')
+            ->where('module_id', $chapter->module_id)
             ->count();
 
-        $moduleDone = $totalInModule > 0 && $doneInModule >= $totalInModule;
+        $doneInModule = DB::table('user_chapter_progress')
+            ->join('chapters', 'user_chapter_progress.chapter_id', '=', 'chapters.id')
+            ->where('user_chapter_progress.user_id', $userId)
+            ->where('chapters.module_id',            $chapter->module_id)
+            ->where('user_chapter_progress.done',    true)
+            ->count();
 
-        $modExists = DB::table('user_module_progress')
-            ->where('user_id', $userId)->where('module_id', $chapter->module_id)->exists();
+        Log::channel('stderr')->info('[CourseController@markChapterDone] Module ' . $chapter->module_id . ': user done ' . $doneInModule . '/' . $totalInModule);
 
-        if ($modExists) {
+        // Upsert into user_module_progress
+        $moduleDone = ($doneInModule >= $totalInModule && $totalInModule > 0);
+
+        $existingModuleProgress = DB::table('user_module_progress')
+            ->where('user_id',   $userId)
+            ->where('module_id', $chapter->module_id)
+            ->first();
+
+        if ($existingModuleProgress) {
             DB::table('user_module_progress')
-                ->where('user_id', $userId)->where('module_id', $chapter->module_id)
+                ->where('user_id',   $userId)
+                ->where('module_id', $chapter->module_id)
                 ->update(['done' => $moduleDone, 'updated_at' => now()]);
         } else {
             DB::table('user_module_progress')->insert([
@@ -409,67 +551,44 @@ class CourseController extends Controller
             ]);
         }
 
-        return response()->json(['message' => 'Chapter marked as done', 'module_done' => $moduleDone]);
+        if ($moduleDone) {
+            Log::channel('stderr')->info('[CourseController@markChapterDone] ✅ Module ' . $chapter->module_id . ' marked done for user=' . $userId);
+        }
+
+        return response()->json([
+            'message'     => 'Chapter marked as done',
+            'module_done' => $moduleDone,
+        ]);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
-
     private function getCourseCompanies($courseId): array
     {
-        // Returns company IDs (integers) — kept for backward-compat
-        return DB::table('company_course')
-            ->where('course_id', $courseId)
-            ->pluck('company_id')
-            ->map(fn($id) => (int) $id)
-            ->toArray();
-    }
-
-    private function getCourseCompanyNames($courseId): array
-    {
-        // Returns company names as strings for the frontend
-        return DB::table('company_course')
-            ->join('company', 'company_course.company_id', '=', 'company.id')
+        return DB::table('companies')
+            ->join('company_course', 'companies.id', '=', 'company_course.company_id')
             ->where('company_course.course_id', $courseId)
-            ->pluck('company.company_name')
+            ->pluck('companies.name')
             ->toArray();
     }
 
     private function getCourseModules($courseId): array
-    {
-        return $this->getCourseModulesForUser($courseId, null);
-    }
-
-    private function getCourseModulesForUser($courseId, $userId): array
     {
         $modules = DB::table('modules')
             ->where('course_id', $courseId)
             ->orderBy('order')
             ->get();
 
-        // Pre-fetch all chapter progress for this user in one query
-        $doneChapterIds = collect();
-        if ($userId) {
-            $moduleIds = $modules->pluck('id');
-            $chapterIds = DB::table('chapters')
-                ->whereIn('module_id', $moduleIds)
-                ->pluck('id');
-            $doneChapterIds = DB::table('user_chapter_progress')
-                ->where('user_id', $userId)
-                ->whereIn('chapter_id', $chapterIds)
-                ->where('done', true)
-                ->pluck('chapter_id');
-        }
+        Log::channel('stderr')->info('[getCourseModules] course_id=' . $courseId . ' → ' . $modules->count() . ' modules found');
 
         foreach ($modules as $module) {
             $module->chapters = DB::table('chapters')
                 ->where('module_id', $module->id)
                 ->orderBy('order')
                 ->get()
-                ->map(function ($chapter) use ($doneChapterIds) {
+                ->map(function ($chapter) {
                     $chapter->content = json_decode($chapter->content, true);
-                    $chapter->done    = $doneChapterIds->contains($chapter->id);
                     return $chapter;
                 })
                 ->toArray();
@@ -478,13 +597,17 @@ class CourseController extends Controller
         return $modules->toArray();
     }
 
-    private function syncCompanies($courseId, array $companyIds): void
+    private function syncCompanies($courseId, array $companyNames): void
     {
-        // Accepts integer IDs directly — no name lookup needed
+        Log::channel('stderr')->info('[syncCompanies] course_id=' . $courseId . ' names: ' . json_encode($companyNames));
+
+        $companyIds = DB::table('companies')->whereIn('name', $companyNames)->pluck('id');
+        Log::channel('stderr')->info('[syncCompanies] Matched company IDs: ' . json_encode($companyIds));
+
         foreach ($companyIds as $companyId) {
             DB::table('company_course')->insertOrIgnore([
                 'course_id'   => $courseId,
-                'company_id'  => (int) $companyId,
+                'company_id'  => $companyId,
                 'assigned_at' => now(),
             ]);
         }
