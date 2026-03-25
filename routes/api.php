@@ -125,7 +125,9 @@ Route::post('/course-icons',              [CourseIconController::class, 'store']
 Route::delete('/course-icons/{id}',       [CourseIconController::class, 'destroy']);
 
 /* ── AI Chat ──────────────────────────────────────────────────── */
-Route::get('/ai/chat/suggestions',  [AIChatController::class, 'suggestions']); // ← ADDED
-Route::post('/ai/chat',             [AIChatController::class, 'chat']);
+// ⚠️  Order matters — specific routes before parameterised ones
+Route::get('/ai/chat/suggestions',  [AIChatController::class, 'suggestions']);
 Route::get('/ai/chat/history',      [AIChatController::class, 'history']);
+Route::get('/ai/chat/stream',       [AIChatController::class, 'stream']);   // SSE console logging
+Route::post('/ai/chat',             [AIChatController::class, 'chat']);
 Route::post('/ai/chat/clear',       [AIChatController::class, 'clear']);

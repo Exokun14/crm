@@ -1,0 +1,63 @@
+{
+    "store_count": {
+        "label": "Store count",
+        "patterns": [
+            "/how many (store|branch|location)/i",
+            "/count.*(store|branch|location)/i",
+            "/number of (store|branch|location)/i",
+            "/total (store|branch|location)/i"
+        ],
+        "query": "SELECT COUNT(*) AS cnt FROM RPS.STORE WHERE ACTIVE = 1",
+        "reply": "You have **{cnt} active branches** across your network. Would you like to see their sales performance today?"
+    },
+
+    "cashier_count": {
+        "label": "Cashier count",
+        "patterns": [
+            "/how many cashier/i",
+            "/count.*(cashier|staff|employee)/i",
+            "/number of (cashier|staff|employee)/i",
+            "/total (cashier|staff|employee)/i"
+        ],
+        "query": "SELECT COUNT(DISTINCT CASHIER_FULL_NAME) AS cnt FROM RPS.DOCUMENT WHERE STATUS=4 AND HAS_SALE=1 AND CASHIER_FULL_NAME IS NOT NULL AND UPPER(CASHIER_FULL_NAME) != 'SYSADMIN' AND POST_DATE >= TRUNC(SYSTIMESTAMP AT TIME ZONE '+08:00', 'MM')",
+        "reply": "There are **{cnt} cashiers** active so far this month. Want to see their rankings?"
+    },
+
+    "item_count": {
+        "label": "Item count",
+        "patterns": [
+            "/how many (item|product|dish)/i",
+            "/count.*(item|product|dish)/i",
+            "/number of (item|product|dish)/i",
+            "/total (item|product|dish) sold/i"
+        ],
+        "query": "SELECT COUNT(DISTINCT di.DESCRIPTION1) AS cnt FROM RPS.DOCUMENT_ITEM di JOIN RPS.DOCUMENT d ON d.SID = di.DOC_SID WHERE d.STATUS=4 AND di.QTY > 0 AND d.POST_DATE >= TRUNC(SYSTIMESTAMP AT TIME ZONE '+08:00')",
+        "reply": "**{cnt} different items** have been sold today. Want to see which ones are selling the most?"
+    },
+
+    "transaction_count": {
+        "label": "Transaction count",
+        "patterns": [
+            "/how many transaction/i",
+            "/count.*(transaction|order|sale)/i",
+            "/number of transaction/i",
+            "/total transaction/i",
+            "/transaction count/i"
+        ],
+        "query": "SELECT COUNT(*) AS cnt FROM RPS.DOCUMENT WHERE STATUS=4 AND HAS_SALE=1 AND POST_DATE >= TRUNC(SYSTIMESTAMP AT TIME ZONE '+08:00') AND POST_DATE < TRUNC(SYSTIMESTAMP AT TIME ZONE '+08:00') + 1",
+        "reply": "There have been **{cnt} transactions** so far today. Want a full sales summary?"
+    },
+
+    "customer_count": {
+        "label": "Customer count",
+        "patterns": [
+            "/how many customer/i",
+            "/count.*customer/i",
+            "/number of customer/i",
+            "/total customer/i",
+            "/customer count/i"
+        ],
+        "query": "SELECT COUNT(*) AS cnt FROM RPS.CUSTOMER WHERE ACTIVE = 1",
+        "reply": "You have **{cnt} registered customers** in the system. Want to see today's new customer activity?"
+    }
+}
