@@ -114,6 +114,19 @@ return [
             // 'trust_server_certificate' => env('DB_TRUST_SERVER_CERTIFICATE', 'false'),
         ],
 
+        // ── Oracle DB (VM at 192.168.6.141) ───────────────────────────────────
+        'oracle' => [
+            'driver'       => 'oracle',
+            'host'         => env('DB_ORACLE_HOST', '192.168.6.141'),
+            'port'         => env('DB_ORACLE_PORT', '1521'),
+            'database'     => env('DB_ORACLE_SERVICE', 'rproods'),
+            'service_name' => env('DB_ORACLE_SERVICE', 'rproods'),
+            'username'     => env('DB_ORACLE_USERNAME', 'reportuser'),
+            'password'     => env('DB_ORACLE_PASSWORD', ''),
+            'charset'      => 'AL32UTF8',
+            'prefix'       => '',
+        ],
+
     ],
 
     /*
