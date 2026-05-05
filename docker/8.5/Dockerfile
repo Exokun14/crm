@@ -81,11 +81,11 @@ RUN apt-get update && apt-get upgrade -y \
 #   https://www.oracle.com/database/technologies/instant-client/linux-x86-64-downloads.html
 #
 #   Required files:
-#     - instantclient-basic-linux.x64-21.21.0.0.0dbru.zip
-#     - instantclient-sdk-linux.x64-21.21.0.0.0dbru.zip
+#    - instantclient-basic-linux.x64-21.21.0.0.0dbru.zip
+#    - instantclient-sdk-linux.x64-21.21.0.0.0dbru.zip
 # ─────────────────────────────────────────────────────────────────────────────
 COPY docker/oracle/instantclient-basic-linux.x64-21.21.0.0.0dbru.zip /tmp/ic-basic.zip
-COPY docker/oracle/instantclient-sdk-linux.x64-21.21.0.0.0dbru.zip   /tmp/ic-sdk.zip
+COPY docker/oracle/instantclient-sdk-linux.x64-21.21.0.0.0dbru.zip /tmp/ic-sdk.zip
 
 RUN apt-get update \
     # Ubuntu 24.04 ships libaio as libaio1t64 (not libaio1)
