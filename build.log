@@ -367,6 +367,7 @@
 #10 43.17 Get:87 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 libpng16-16t64 amd64 1.6.43-5ubuntu0.5 [188 kB]
 #10 43.40 Get:88 http://archive.ubuntu.com/ubuntu noble/main amd64 libpsl5t64 amd64 0.21.2-1.1build1 [57.1 kB]
 #10 43.62 Get:89 http://archive.ubuntu.com/ubuntu noble/main amd64 libsensors-config all 1:3.6.0-9build1 [5546 B]
+<<<<<<< Updated upstream
 #10 43.83 Get:90 http://archive.ubuntu.com/ubuntu noble/main amd64 libsensors5 amd64 1:3.6.0-9build1 [26.6 kB]
 #10 44.05 Get:91 http://archive.ubuntu.com/ubuntu noble/main amd64 libusb-1.0-0 amd64 2:1.0.27-1 [54.0 kB]
 #10 44.27 Get:92 http://archive.ubuntu.com/ubuntu noble/main amd64 libxau6 amd64 1:1.0.9-1build6 [7160 B]
@@ -2345,3 +2346,5 @@
 #10 218.9 Get:82 https://ppa.launchpadcontent.net/ondrej/php/ubuntu noble/main amd64 php8.5-mbstring amd64 8.5.3-2+ubuntu24.04.1+deb.sury.org+1 [519 kB]
 failed to execute bake: exit status 0xc000013a
 ^C
+=======
+>>>>>>> Stashed changes
